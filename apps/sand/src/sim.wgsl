@@ -1,9 +1,10 @@
 // The sim on the GPU: a line-for-line mirror of crates/sim (`next`, `World::update`,
 // `World::paint`). Keep the two identical; the GPU parity test checks them bit for bit.
 //
-// A cell's word: state (bits 0-4), kept-back value (bits 5-9), phase (bits 10-31).
-// A state: material (bits 0-1: 0 air, 1 sand, 2 slate, 3 bedrock), then one intent (bits 2-4): sand's
-// offer or air's acceptance, stored as 1 + a direction's index, 0 meaning none.
+// A cell's word: state (bits 0-7), kept-back value (bits 8-15), phase (bits 16-31).
+// A state: material (bits 0-2: 0 air, 1 sand, 2 water, 3 slate, 4 bedrock), then one intent
+// (bits 3-5): sand's or water's offer, or air's acceptance, stored as 1 + a direction's index, 0
+// meaning none; then, for water only, its flow (bit 6, set for right) and waited (bit 7).
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
@@ -15,7 +16,7 @@ struct Params {
 }
 
 // A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
-// (0 air, 1 sand, 2 slate).
+// (0 air, 1 sand, 2 water, 3 slate).
 struct Stamp {
     x: f32,
     y: f32,
@@ -27,16 +28,19 @@ struct Stamp {
 @group(0) @binding(1) var<storage, read_write> cells: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read> stamps: array<Stamp>;
 
-const STATE_BITS: u32 = 5u;
-const STATE_MASK: u32 = 31u;
-const PHASE_SHIFT: u32 = 10u;
-const PHASE_MASK: u32 = 0x3fffffu;
+const STATE_BITS: u32 = 8u;
+const STATE_MASK: u32 = 255u;
+const PHASE_SHIFT: u32 = 16u;
+const PHASE_MASK: u32 = 0xffffu;
 const AIR: u32 = 0u;
 const SAND: u32 = 1u;
-const SLATE: u32 = 2u;
-const BEDROCK: u32 = 3u;
+const WATER: u32 = 2u;
+const SLATE: u32 = 3u;
+const BEDROCK: u32 = 4u;
+const FLOW_RIGHT: u32 = 64u;
 const SALT_OFFER: u32 = 1u;
 const SALT_ACCEPT: u32 = 2u;
+const SALT_FLOW: u32 = 3u;
 
 fn mix(v0: u32) -> u32 {
     var v = v0;
@@ -77,15 +81,43 @@ fn opposite(d: u32) -> u32 {
 }
 
 fn material_of(s: u32) -> u32 {
-    return s & 3u;
+    return min(s & 7u, BEDROCK);
+}
+
+fn moves(m: u32) -> bool {
+    return m == SAND || m == WATER;
 }
 
 fn offer_of(s: u32) -> u32 {
-    return select(0u, (s >> 2u) & 7u, material_of(s) == SAND);
+    return select(0u, (s >> 3u) & 7u, moves(material_of(s)));
 }
 
 fn accept_of(s: u32) -> u32 {
-    return select(0u, (s >> 2u) & 7u, material_of(s) == AIR);
+    return select(0u, (s >> 3u) & 7u, material_of(s) == AIR);
+}
+
+// `Side::of` in crates/sim, as a flow bit: 1 right, 0 left, 2 for a vertical move.
+fn side_of(d: u32) -> u32 {
+    switch d {
+        case 1u, 2u: { return 1u; }
+        case 4u, 5u: { return 0u; }
+        default: { return 2u; }
+    }
+}
+
+// `Side::up`: the upper diagonal on a side.
+fn up_of(right: u32) -> u32 {
+    return select(5u, 1u, right == 1u);
+}
+
+// A neighbor I could offer to: it holds air and is free to accept.
+fn free(n: u32) -> bool {
+    return material_of(n) == AIR && accept_of(n) == 0u;
+}
+
+// An offer toward `d` stands while its target holds air and hasn't accepted someone else.
+fn standing(n: u32, d: u32) -> bool {
+    return material_of(n) == AIR && (accept_of(n) == 0u || accept_of(n) == opposite(d) + 1u);
 }
 
 // `pick` in crates/sim: the candidate with the highest key, equals chosen by `bits`.
@@ -129,49 +161,95 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
     var material = material_of(me);
     var new_offer = offer;
     var new_accept = accept;
-    // Transfer, the receiving half.
+    var flow = (me >> 6u) & 1u;
+    var waited = (me >> 7u) & 1u;
+    // Transfer, the receiving half. Water brings its flow, turned toward the side it moved to.
     if accept != 0u {
         new_accept = 0u;
         let d = accept - 1u;
         let n = (*seen)[d];
         if offer_of(n) == opposite(d) + 1u {
             material = material_of(n);
+            let side = side_of(opposite(d));
+            flow = select(side, (n >> 6u) & 1u, side == 2u);
+            waited = 0u;
         }
     }
 
     if material == AIR {
         if accept == 0u {
+            // A side offer, from below, is taken only where I could pass the water on downhill.
+            let pass_on = material_of((*seen)[3]) == AIR;
             var p = Picker(array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u), 0u, -2147483647 - 1);
             for (var d = 0u; d < 6u; d++) {
                 let n = (*seen)[d];
-                if material_of(n) == SAND && offer_of(n) == opposite(d) + 1u {
-                    consider(&p, d, -fall(x, y, d));
+                if moves(material_of(n)) && offer_of(n) == opposite(d) + 1u {
+                    let f = fall(x, y, d);
+                    var passes = false;
+                    if d == 2u || d == 4u {
+                        passes = pass_on || material_of((*seen)[6u - d]) == AIR;
+                    }
+                    if f < 0 || passes {
+                        consider(&p, d, -f);
+                    }
                 }
             }
             new_accept = chosen(&p, hash(x, y, phase, SALT_ACCEPT));
         }
-        return AIR | (new_accept << 2u);
+        return AIR | (new_accept << 3u);
     }
     if material == SAND {
-        if new_offer != 0u {
-            let d = new_offer - 1u;
-            let n = (*seen)[d];
-            let open = material_of(n) == AIR && (accept_of(n) == 0u || accept_of(n) == opposite(d) + 1u);
-            if !open {
-                new_offer = 0u;
-            }
+        if new_offer != 0u && !standing((*seen)[new_offer - 1u], new_offer - 1u) {
+            new_offer = 0u;
         }
         if new_offer == 0u {
             var p = Picker(array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u), 0u, -2147483647 - 1);
             for (var d = 0u; d < 6u; d++) {
-                let n = (*seen)[d];
-                if fall(x, y, d) > 0 && material_of(n) == AIR && accept_of(n) == 0u {
+                if fall(x, y, d) > 0 && free((*seen)[d]) {
                     consider(&p, d, fall(x, y, d));
                 }
             }
             new_offer = chosen(&p, hash(x, y, phase, SALT_OFFER));
         }
-        return SAND | (new_offer << 2u);
+        return SAND | (new_offer << 3u);
+    }
+    if material == WATER {
+        if new_offer != 0u {
+            let d = new_offer - 1u;
+            let n = (*seen)[d];
+            if !standing(n, d) {
+                new_offer = 0u;
+            } else if fall(x, y, d) < 0 && accept_of(n) == 0u {
+                // A side offer unanswered a second time was declined: flip, and try the other side.
+                if waited == 1u {
+                    new_offer = 0u;
+                    flow = 1u - flow;
+                } else {
+                    waited = 1u;
+                }
+            }
+        }
+        if new_offer == 0u {
+            waited = 0u;
+            // Fall: straight down first, then the diagonal on the flow side.
+            var p = Picker(array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u), 0u, -2147483647 - 1);
+            for (var d = 0u; d < 6u; d++) {
+                if fall(x, y, d) > 0 && free((*seen)[d]) {
+                    consider(&p, d, 2 * fall(x, y, d) + select(0, 1, side_of(d) == flow));
+                }
+            }
+            new_offer = chosen(&p, 0u);
+            if new_offer == 0u {
+                // Side step: the flow side first, else the other, which becomes the flow.
+                if free((*seen)[up_of(flow)]) {
+                    new_offer = up_of(flow) + 1u;
+                } else if free((*seen)[up_of(1u - flow)]) {
+                    flow = 1u - flow;
+                    new_offer = up_of(flow) + 1u;
+                }
+            }
+        }
+        return WATER | (new_offer << 3u) | (flow << 6u) | (waited << 7u);
     }
     return material; // slate and bedrock never change
 }
@@ -232,6 +310,9 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         if off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius
             && select(material_of(state) == AIR, material_of(state) != BEDROCK, material == AIR) {
             state = material;
+            if material == WATER && (hash(x, y, 0u, SALT_FLOW) & 1u) == 1u {
+                state |= FLOW_RIGHT;
+            }
             painted = true;
         }
     }

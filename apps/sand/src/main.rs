@@ -1,6 +1,6 @@
-//! Falling Sand Engine, v00.02: sand, slate and air. The lattice lives on the GPU; the brush
-//! paints sand or slate into air and erases; the config panel tunes the rates, the cell size
-//! and the brush.
+//! Falling Sand Engine, v00.03: sand, water, slate and air. The lattice lives on the GPU; the
+//! brush paints sand, water or slate into air and erases; the config panel tunes the rates, the
+//! cell size and the brush.
 //!
 //! Native: `cargo run -p sand`, or `cargo run -p sand -- --snapshot out.png` for a headless
 //! strip of a seeded scene settling. Web: `trunk serve` from this folder.
@@ -39,7 +39,7 @@ impl Tunable for Config {
             |c| &mut c.max_phases,
         );
         s.group("Lattice").float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size);
-        s.group("Brush").choice("tool", "Tool", &["Sand", "Slate", "Erase"], |c| &mut c.tool).float(
+        s.group("Brush").choice("tool", "Tool", &["Sand", "Water", "Slate", "Erase"], |c| &mut c.tool).float(
             "brush_radius",
             "Radius",
             "cells",
@@ -93,7 +93,7 @@ impl Game {
 
     fn stamp(&mut self, at: Vec2) {
         let c = &self.tuner.current;
-        let material = [Material::Sand, Material::Slate, Material::Air][c.tool.min(2)];
+        let material = [Material::Sand, Material::Water, Material::Slate, Material::Air][c.tool.min(3)];
         self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, material });
     }
 
@@ -197,7 +197,8 @@ impl App for Game {
     }
 }
 
-/// The snapshot scene: a slate funnel under a scattering and a solid block, left to settle.
+/// The snapshot scene: a slate funnel under a scattering of sand, a solid block of sand and a
+/// block of water, left to settle.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn scene(world: &mut World) {
     let (w, h) = (world.width(), world.height());
@@ -213,7 +214,10 @@ fn scene(world: &mut World) {
     for y in 0..h / 2 {
         for x in 0..w {
             let block = (w / 3..w / 2).contains(&x) && y < h / 4;
-            if block || sim::hash(x, y, 0, 41).is_multiple_of(4) {
+            let pool = (w * 3 / 5..w * 4 / 5).contains(&x) && y < h / 3;
+            if pool {
+                world.paint(x, y, Material::Water);
+            } else if block || sim::hash(x, y, 0, 41).is_multiple_of(4) {
                 world.paint(x, y, Material::Sand);
             }
         }

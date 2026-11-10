@@ -17,6 +17,7 @@ struct View {
 const BEDROCK: vec3<f32> = vec3(0.031, 0.035, 0.047);
 const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
 const SAND: vec3<f32> = vec3(0.871, 0.718, 0.431);
+const WATER: vec3<f32> = vec3(0.220, 0.470, 0.800);
 const SLATE: vec3<f32> = vec3(0.310, 0.345, 0.400);
 
 @vertex
@@ -34,7 +35,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(BEDROCK, 1.0);
     }
-    let material = cells[y * view.width + x] & 3u;
-    var colors = array<vec3<f32>, 4>(AIR, SAND, SLATE, BEDROCK);
+    let material = min(cells[y * view.width + x] & 7u, 4u);
+    var colors = array<vec3<f32>, 5>(AIR, SAND, WATER, SLATE, BEDROCK);
     return vec4(colors[material], 1.0);
 }

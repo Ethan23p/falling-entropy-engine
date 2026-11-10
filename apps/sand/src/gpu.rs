@@ -224,8 +224,10 @@ mod tests {
         }
         for y in 0..h * 2 / 3 {
             for x in 0..w {
-                if sim::hash(x, y, 0, 77).is_multiple_of(3) {
-                    world.paint(x, y, Material::Sand);
+                match sim::hash(x, y, 0, 77) % 6 {
+                    0 | 1 => world.paint(x, y, Material::Sand),
+                    2 | 3 => world.paint(x, y, Material::Water),
+                    _ => {}
                 }
             }
         }
@@ -271,6 +273,7 @@ mod tests {
             Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Air },
             Stamp { x: 45.0, y: 20.0, radius: 5.5, material: Material::Slate },
             Stamp { x: 10.0, y: 10.0, radius: 3.5, material: Material::Air },
+            Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Water },
         ];
         for s in &stamps {
             world.stamp(s.x, s.y, s.radius, s.material);
