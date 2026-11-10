@@ -262,8 +262,9 @@ mod tests {
                 .map(|&b| u32::from_le_bytes(b))
                 .collect();
             readback.unmap();
-            let first = gpu.iter().zip(world.words()).position(|(a, b)| a != b);
-            assert_eq!(first, None, "after {phase} phases, first mismatch at cell {first:?}");
+            if let Some(report) = sim::debug::diff(&world, &World::from_words(w, h, gpu)) {
+                panic!("after {phase} phases, the GPU differs from the reference: {report}");
+            }
         }
 
         // The brush, in the middle of motion: matter only into air, erasing anywhere, in order.
@@ -296,7 +297,8 @@ mod tests {
             .iter()
             .map(|&b| u32::from_le_bytes(b))
             .collect();
-        let first = gpu.iter().zip(world.words()).position(|(a, b)| a != b);
-        assert_eq!(first, None, "after the brush, first mismatch at cell {first:?}");
+        if let Some(report) = sim::debug::diff(&world, &World::from_words(w, h, gpu)) {
+            panic!("after the brush, the GPU differs from the reference: {report}");
+        }
     }
 }

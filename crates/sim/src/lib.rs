@@ -6,6 +6,7 @@
 //! advanced by synchronizer-phasing, moving matter by a directed handshake
 //! (offer → accept → transfer) at reach 1 with self-writes only.
 
+pub mod debug;
 #[cfg(test)]
 mod tests;
 

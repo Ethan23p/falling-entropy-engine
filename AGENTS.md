@@ -23,7 +23,7 @@ Ethan is the designer and owns the doc. Claude is the engineer and owns the code
 - **Every design decision is open until settled in chat with Ethan.** That covers physics, materials, rules, geometry, conservation and feel. Bring them as two or three concrete options with a recommendation.
 - **A settled decision goes into the tab in the same turn.** Usually that means a primitive; if it can't be settled yet, an open question.
 - **New primitives are added freely** when the implementation needs one. **Settled primitives change with care,** in chat first.
-- Engineering calls (crate layout, encodings, test harness) are Claude's. Record one in the tab only if it shapes a primitive.
+- Engineering calls (crate layout, encodings, test harness, tooling) are Claude's. Record one in the tab only if it shapes a primitive. A refinement within a settled design can be built first and raised in the wrap-up.
 
 ## Workflow
 
@@ -38,7 +38,8 @@ Each version targets one mechanic, the next on the Focus list:
 Keep it low-key:
 - Tests must stay fast. Compile times must stay low: few dependencies, and the sim crate has none.
 - The foundations (synchrony, the handshake, rendering) get the most care; everything builds on them.
-- Read only what the step needs. Don't re-read the whole doc each session.
+- Context is a budget. Read only what the step needs; don't re-read the whole doc each session. Start each version in a fresh session, and send wide reading, searching and surveys to subagents, which return only their conclusions.
+- Write code with the file-editing tools, not shell heredocs: the Bash tool's heredocs break on apostrophes.
 - Keep this file accurate when a rule or a command changes. Never put status here.
 
 ## Architecture rules
@@ -64,7 +65,7 @@ From the repo root:
 - Native window: `cargo run -p sand`. Headless snapshot: `cargo run -p sand -- --snapshot target/snap.png` renders a seeded scene settling at 0, 1, 3 and 8 s, side by side. Look at it after any sim or render change.
 - Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.
 
-Layout: `crates/sim` (CPU reference), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer).
+Layout: `crates/sim` (CPU reference; its `debug` module draws a world as text, true to the hex offset, for failing assertions: `world.ascii()`, `world.ascii_intents()`, `debug::diff`), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer).
 
 ## Environment
 
