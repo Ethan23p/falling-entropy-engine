@@ -58,6 +58,11 @@ Keep it low-key:
 
 From the repo root:
 - Tests: `cargo test --workspace`. Lint: `cargo clippy --workspace --all-targets`. Format: `cargo fmt --all` (120 columns).
+- GPU parity test (needs a GPU): `cargo test -p sand -- --ignored`.
+- Native window: `cargo run -p sand`. Headless snapshot: `cargo run -p sand -- --snapshot target/snap.png` renders a seeded scene settling at 0, 1, 3 and 8 s, side by side. Look at it after any sim or render change.
+- Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.
+
+Layout: `crates/sim` (CPU reference), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer).
 
 ## Environment
 

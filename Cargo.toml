@@ -1,11 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "apps/*"]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 publish = false
+
+[workspace.dependencies]
+sim = { path = "crates/sim" }
+# The shared platform layer, pinned. For local co-development, see AGENTS.md.
+engine = { git = "https://github.com/Ethan23p/contra-ethos-games", rev = "48210d5ebfbec0c580bc53f90055a10c5f850188" }
+pollster = "1"
 
 [profile.release]
 opt-level = "s"

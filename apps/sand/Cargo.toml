@@ -1,0 +1,13 @@
+[package]
+name = "sand"
+description = "The game: the sim on the GPU, the brush and the renderer, on the shared engine."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine.workspace = true
+sim.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+pollster.workspace = true

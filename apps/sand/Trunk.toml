@@ -1,0 +1,7 @@
+[serve]
+# 8080 is Steam's on this machine; the platform's apps use 8765-8767.
+addresses = ["127.0.0.1"]
+port = 8770
+
+[watch]
+watch = [".", "../../crates"]
