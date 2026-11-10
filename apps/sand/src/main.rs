@@ -1,29 +1,43 @@
 //! Falling Sand Engine, v00.03: sand, water, slate and air. The lattice lives on the GPU; the
 //! brush paints sand, water or slate into air and erases; the config panel tunes the rates, the
-//! cell size and the brush.
+//! cell size and the brush, and picks a preset scene.
 //!
-//! Native: `cargo run -p sand`, or `cargo run -p sand -- --snapshot out.png` for a headless
-//! strip of a seeded scene settling. Web: `trunk serve` from this folder.
+//! Native: `cargo run -p sand [-- --scene NAME]`. Web: `trunk serve` from this folder, with
+//! `?scene=NAME` to start in a scene. The harness: `cargo run -p sand -- strip|bench ...`.
 
 mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+mod harness;
+
+use std::sync::LazyLock;
 
 use engine::glam::Vec2;
 use engine::{App, Frame, Gpu, Input, Phase, Schema, Shapes, Tunable, Tuner, wgpu};
 use gpu::{Lattice, Pipelines, Stamp};
+use scenes::Scene;
 use sim::{Material, World};
 
+static SCENE_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(scenes::names);
+
 #[derive(Clone)]
-struct Config {
-    sim_rate: f32,
-    max_phases: i32,
-    cell_size: f32,
-    brush_radius: f32,
-    tool: usize,
+pub struct Config {
+    pub sim_rate: f32,
+    pub max_phases: i32,
+    pub cell_size: f32,
+    pub scene: usize,
+    pub brush_radius: f32,
+    pub tool: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { sim_rate: 60.0, max_phases: 8, cell_size: 4.0, brush_radius: 3.0, tool: 0 }
+        Self { sim_rate: 60.0, max_phases: 8, cell_size: 4.0, scene: 0, brush_radius: 3.0, tool: 0 }
+    }
+}
+
+impl Config {
+    pub fn scene(&self) -> &'static Scene {
+        &scenes::ALL[self.scene.min(scenes::ALL.len() - 1)]
     }
 }
 
@@ -38,7 +52,9 @@ impl Tunable for Config {
             1..=64,
             |c| &mut c.max_phases,
         );
-        s.group("Lattice").float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size);
+        s.group("Lattice")
+            .float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size)
+            .choice("scene", "Scene (rebuilds)", &SCENE_NAMES, |c| &mut c.scene);
         s.group("Brush").choice("tool", "Tool", &["Sand", "Water", "Slate", "Erase"], |c| &mut c.tool).float(
             "brush_radius",
             "Radius",
@@ -54,35 +70,36 @@ struct Game {
     tuner: Tuner<Config>,
     pipelines: Option<Pipelines>,
     lattice: Option<Lattice>,
-    /// The cell size the lattice was built for, and whether a rebuild was asked for.
-    built_cell_size: f32,
+    /// What the lattice was built with, and whether a rebuild was asked for.
+    built: (f32, usize),
     rebuild: bool,
-    /// Phases owed since the last render frame.
+    /// Phases owed since the last render frame, and phases run since the scene was built.
     pending: u32,
+    scene_phase: u32,
     stamps: Vec<Stamp>,
+    script: Vec<scenes::Stamp>,
     /// Where each held pointer last painted, in cell units.
     strokes: Vec<(u64, Vec2)>,
     /// Top-left and size of one cell, in pixels, as last drawn.
     origin: Vec2,
     cell: Vec2,
-    /// Fills a freshly built lattice.
-    seed: fn(&mut World),
 }
 
 impl Game {
-    fn new(tuner: Tuner<Config>, seed: fn(&mut World)) -> Self {
+    fn new(tuner: Tuner<Config>) -> Self {
         Self {
             tuner,
             pipelines: None,
             lattice: None,
-            built_cell_size: 0.0,
+            built: (0.0, 0),
             rebuild: false,
             pending: 0,
+            scene_phase: 0,
             stamps: Vec::new(),
+            script: Vec::new(),
             strokes: Vec::new(),
             origin: Vec2::ZERO,
             cell: Vec2::ONE,
-            seed,
         }
     }
 
@@ -152,11 +169,12 @@ impl App for Game {
         frame: &Frame,
     ) -> bool {
         let Some(pipelines) = self.pipelines.as_ref() else { return false };
-        let cell_size = self.tuner.current.cell_size;
-        if self.lattice.is_none() || self.rebuild || cell_size != self.built_cell_size {
+        let c = &self.tuner.current;
+        let wanted = (c.cell_size, c.scene);
+        if self.lattice.is_none() || self.rebuild || wanted != self.built {
             // The lattice is sized once, to fill the screen at this cell size; later
             // resizes scale it to fit rather than rebuilding it.
-            let px = cell_size * frame.scale;
+            let px = c.cell_size * frame.scale;
             let width = (frame.size.x / px) as i32;
             let height = (frame.size.y / px - 0.5) as i32;
             if width < 8 || height < 8 {
@@ -165,10 +183,11 @@ impl App for Game {
                 return false;
             }
             let mut world = World::new(width, height);
-            (self.seed)(&mut world);
+            c.scene().build(&mut world);
             self.lattice = Some(Lattice::new(gpu.device, pipelines, &world));
-            self.built_cell_size = cell_size;
+            self.built = wanted;
             self.rebuild = false;
+            self.scene_phase = 0;
             self.stamps.clear();
         }
         let lattice = self.lattice.as_ref().expect("lattice");
@@ -180,6 +199,19 @@ impl App for Game {
 
         let phases = self.pending.min(self.tuner.current.max_phases.max(1) as u32);
         self.pending = 0;
+        // The scene's script for the phases this frame runs, applied with the player's strokes.
+        self.script.clear();
+        let scene = self.tuner.current.scene();
+        for p in self.scene_phase..self.scene_phase + phases {
+            scene.stamps(p, lattice.width, lattice.height, &mut self.script);
+        }
+        self.scene_phase += phases;
+        self.stamps.extend(self.script.iter().map(|s| Stamp {
+            x: s.x,
+            y: s.y,
+            radius: s.radius,
+            material: s.material,
+        }));
         lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, phases);
         self.stamps.clear();
         lattice.render(gpu.queue, pipelines, encoder, target, self.origin.into(), self.cell.into());
@@ -197,46 +229,38 @@ impl App for Game {
     }
 }
 
-/// The snapshot scene: a slate funnel under a scattering of sand, a solid block of sand and a
-/// block of water, left to settle.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn scene(world: &mut World) {
-    let (w, h) = (world.width(), world.height());
-    // Two slate ramps sloping in toward a gap in the middle, two thirds of the way down. Each
-    // walks from the gap along up-diagonal neighbors, so it has no holes.
-    for (start, d) in [(w / 2 + 3, sim::Dir::UpRight), (w / 2 - 3, sim::Dir::UpLeft)] {
-        let (mut x, mut y) = (start, h * 2 / 3);
-        while world.in_bounds(x, y) && (x - w / 2).abs() < w / 2 - 2 {
-            world.paint(x, y, Material::Slate);
-            (x, y) = sim::neighbor(x, y, d);
-        }
-    }
-    for y in 0..h / 2 {
-        for x in 0..w {
-            let block = (w / 3..w / 2).contains(&x) && y < h / 4;
-            let pool = (w * 3 / 5..w * 4 / 5).contains(&x) && y < h / 3;
-            if pool {
-                world.paint(x, y, Material::Water);
-            } else if block || sim::hash(x, y, 0, 41).is_multiple_of(4) {
-                world.paint(x, y, Material::Sand);
-            }
-        }
-    }
+/// The scene named in the page's `?scene=` query, if any.
+#[cfg(target_arch = "wasm32")]
+fn url_scene() -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    search.trim_start_matches('?').split('&').find_map(|kv| kv.strip_prefix("scene=")).map(str::to_string)
 }
 
 fn main() {
+    let mut tuner: Tuner<Config> = Tuner::new();
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let args: Vec<String> = std::env::args().collect();
-        if let Some(i) = args.iter().position(|a| a == "--snapshot") {
-            let path = args.get(i + 1).map_or("snapshot.png", String::as_str);
-            let mut tuner: Tuner<Config> = Tuner::unsaved();
-            tuner.current.max_phases = i32::MAX;
-            let mut app = Game::new(tuner, scene);
-            engine::headless::snapshot_strip(&mut app, 240, 360, &[0.0, 1.0, 3.0, 8.0], path.as_ref());
-            println!("wrote {path}");
-            return;
+    let named = {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if matches!(args.first().map(String::as_str), Some("strip" | "bench")) {
+            std::process::exit(harness::main(&args));
+        }
+        args.iter().position(|a| a == "--scene").and_then(|i| args.get(i + 1).cloned())
+    };
+    #[cfg(target_arch = "wasm32")]
+    let named = url_scene();
+    if let Some(name) = named {
+        match scenes::ALL.iter().position(|s| s.name.eq_ignore_ascii_case(&name)) {
+            Some(i) => tuner.current.scene = i,
+            None => log_unknown(&name),
         }
     }
-    engine::run(Game::new(Tuner::new(), |_| {}));
+    engine::run(Game::new(tuner));
+}
+
+fn log_unknown(name: &str) {
+    let known = scenes::names().join(", ");
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("no scene `{name}`; scenes: {known}");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&format!("no scene `{name}`; scenes: {known}").into());
 }

@@ -62,10 +62,12 @@ Keep it low-key:
 From the repo root:
 - Tests: `cargo test --workspace`. Lint: `cargo clippy --workspace --all-targets`. Format: `cargo fmt --all` (120 columns).
 - GPU parity test (needs a GPU): `cargo test -p sand -- --ignored`.
-- Native window: `cargo run -p sand`. Headless snapshot: `cargo run -p sand -- --snapshot target/snap.png` renders a seeded scene settling at 0, 1, 3 and 8 s, side by side. Look at it after any sim or render change.
+- Native window: `cargo run -p sand [-- --scene NAME]`; on the web, `?scene=NAME`. Scenes are presets shared by the game (the Scene choice in the config panel) and the harness.
+- Strips: `cargo run -p sand -- strip SCENE... [--note "a couple words"] [--at 0,1,3,8] [--when settled,level,moving<10] [--set ID=VALUE]` renders a vertical strip of frames, with a header and per-frame metrics, to `target/strips/<scene>.png` and `.txt`. `strip all` does every scene; `strip` alone prints the options. Look at one after any sim or render change.
+- Feel bench: `cargo run -p sand -- bench` measures feel (pile angle, settling, leveling, flow) on the CPU reference and compares with the last run, saved in `target/bench.txt`. Run it before and after a change to a rule.
 - Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.
 
-Layout: `crates/sim` (CPU reference; its `debug` module draws a world as text, true to the hex offset, for failing assertions: `world.ascii()`, `world.ascii_intents()`, `debug::diff`), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer).
+Layout: `crates/sim` (CPU reference; its `debug` module draws a world as text, true to the hex offset, for failing assertions: `world.ascii()`, `world.ascii_intents()`, `debug::diff`), `crates/scenes` (preset scenes, scripted brush input and the text format for painted scenes; `run` steps a scene on the CPU reference and measures it), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer; natively, `harness.rs` holds strips and the bench).
 
 ## Environment
 

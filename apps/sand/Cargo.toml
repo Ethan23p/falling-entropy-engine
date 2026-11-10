@@ -1,6 +1,6 @@
 [package]
 name = "sand"
-description = "The game: the sim on the GPU, the brush and the renderer, on the shared engine."
+description = "The game: the sim on the GPU, the brush and the renderer, on the shared engine. Natively, also the harness: strips and the feel benchmark."
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,6 +8,13 @@ publish.workspace = true
 [dependencies]
 engine.workspace = true
 sim.workspace = true
+scenes.workspace = true
 
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The harness. The engine already builds these, so they add no compile time.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+fontdue = "0.9"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Location", "console"] }
