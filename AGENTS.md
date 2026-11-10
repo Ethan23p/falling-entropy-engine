@@ -62,7 +62,7 @@ Keep it low-key:
 From the repo root:
 - Tests: `cargo test --workspace`. Lint: `cargo clippy --workspace --all-targets`. Format: `cargo fmt --all` (120 columns).
 - GPU parity test (needs a GPU): `cargo test -p sand -- --ignored`.
-- Native window: `cargo run -p sand [-- --scene NAME]`; on the web, `?scene=NAME`. Scenes are presets shared by the game (the Scene choice in the config panel) and the harness.
+- Native window: `cargo run -p sand [-- --scene NAME]`; on the web, `?scene=NAME`. Scenes are presets shared by the game (the Scene choice in the config panel) and the harness. Copy scene, in the config panel, copies the world as a painting's text; save one Ethan sends as `crates/scenes/painted/NAME.fse` and list it in `scenes::ALL` with `Build::Painted(include_str!(...))`.
 - Strips: `cargo run -p sand -- strip SCENE... [--note "a couple words"] [--at 0,1,3,8] [--when settled,level,moving<10] [--set ID=VALUE]` renders a vertical strip of frames, with a header and per-frame metrics, to `target/strips/<scene>.png` and `.txt`. `strip all` does every scene; `strip` alone prints the options. Look at one after any sim or render change.
 - Feel bench: `cargo run -p sand -- bench` measures feel (pile angle, settling, leveling, flow) on the CPU reference and compares with the last run, saved in `target/bench.txt`. Run it before and after a change to a rule.
 - Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.

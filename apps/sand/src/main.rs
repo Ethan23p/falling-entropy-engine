@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use engine::glam::Vec2;
 use engine::{App, Frame, Gpu, Input, Phase, Schema, Shapes, Tunable, Tuner, wgpu};
-use gpu::{Lattice, Pipelines, Stamp};
+use gpu::{Lattice, Pipelines, Readback, Stamp};
 use scenes::Scene;
 use sim::{Material, World};
 
@@ -83,7 +83,19 @@ struct Game {
     /// Top-left and size of one cell, in pixels, as last drawn.
     origin: Vec2,
     cell: Vec2,
+    /// Copy scene: while the config panel is open, the world is read back every few frames
+    /// and kept as a painting's text. A phone's clipboard accepts text only during the tap,
+    /// so the tap copies text that is already there.
+    readback: Option<Readback>,
+    panel_open: bool,
+    frames_since_read: u32,
+    scene_text: Option<String>,
+    /// Frames left to show "Copied".
+    copied: u32,
 }
+
+/// How often Copy scene's text is refreshed while the panel is open, in frames.
+const READ_EVERY: u32 = 15;
 
 impl Game {
     fn new(tuner: Tuner<Config>) -> Self {
@@ -100,6 +112,11 @@ impl Game {
             strokes: Vec::new(),
             origin: Vec2::ZERO,
             cell: Vec2::ONE,
+            readback: None,
+            panel_open: false,
+            frames_since_read: 0,
+            scene_text: None,
+            copied: 0,
         }
     }
 
@@ -189,6 +206,7 @@ impl App for Game {
             self.rebuild = false;
             self.scene_phase = 0;
             self.stamps.clear();
+            self.scene_text = None;
         }
         let lattice = self.lattice.as_ref().expect("lattice");
 
@@ -215,6 +233,7 @@ impl App for Game {
         lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, phases);
         self.stamps.clear();
         lattice.render(gpu.queue, pipelines, encoder, target, self.origin.into(), self.cell.into());
+        self.read_scene(gpu, encoder);
         true
     }
 
@@ -223,9 +242,47 @@ impl App for Game {
     }
 
     fn config_actions(&mut self, ui: &mut engine::egui::Ui) {
-        if ui.button("Clear").clicked() {
-            self.rebuild = true;
+        self.panel_open = true;
+        ui.horizontal(|ui| {
+            if ui.button("Clear").clicked() {
+                self.rebuild = true;
+            }
+            let label = if self.copied > 0 { "Copied" } else { "Copy scene" };
+            let copy = ui.add_enabled(self.scene_text.is_some(), engine::egui::Button::new(label));
+            if copy.clicked()
+                && let Some(text) = &self.scene_text
+            {
+                ui.ctx().copy_text(text.clone());
+                self.copied = 60;
+            }
+        });
+    }
+}
+
+impl Game {
+    /// Keeps `scene_text` fresh while the config panel is open (see `readback`).
+    fn read_scene(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder) {
+        let lattice = self.lattice.as_ref().expect("lattice");
+        let open = std::mem::take(&mut self.panel_open);
+        self.copied = self.copied.saturating_sub(1);
+        self.frames_since_read += 1;
+        let readback = self.readback.get_or_insert_with(|| Readback::new(gpu.device, lattice));
+        if let Some(words) = readback.poll(gpu.device) {
+            let world = World::from_words(readback.width, readback.height, words);
+            let about = match self.tuner.current.scene().name {
+                "empty" => "painted in the game".to_string(),
+                name => format!("painted in the game, from {name}"),
+            };
+            self.scene_text = Some(scenes::Painting::of(&world, &about).to_text());
         }
+        if !open || !readback.idle() || self.frames_since_read < READ_EVERY {
+            return;
+        }
+        if !readback.fits(lattice) {
+            *readback = Readback::new(gpu.device, lattice);
+        }
+        readback.start(encoder, lattice);
+        self.frames_since_read = 0;
     }
 }
 

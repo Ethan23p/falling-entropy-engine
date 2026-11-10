@@ -1,6 +1,9 @@
 //! The lattice on the GPU: the cell buffer, the sim and brush compute passes, and the
 //! render pass that samples it. The shaders mirror `crates/sim`.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use engine::wgpu;
 
 /// The most stamps one brush pass applies.
@@ -196,6 +199,92 @@ impl Lattice {
         pass.set_pipeline(&pipelines.render);
         pass.set_bind_group(0, &self.render_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+/// The cells read back without stalling a frame: copy in one frame, map in the next, read once
+/// the map lands. One read in flight at a time.
+pub struct Readback {
+    buffer: wgpu::Buffer,
+    pub width: i32,
+    pub height: i32,
+    stage: Stage,
+    /// Set by the map callback: 1 once mapped, 2 if mapping failed.
+    mapped: Arc<AtomicU8>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Idle,
+    /// The copy is encoded; it is submitted at the end of the frame.
+    Copied,
+    Mapping,
+}
+
+impl Readback {
+    pub fn new(device: &wgpu::Device, lattice: &Lattice) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (lattice.width * lattice.height * 4) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let (width, height) = (lattice.width, lattice.height);
+        Self { buffer, width, height, stage: Stage::Idle, mapped: Arc::new(AtomicU8::new(0)) }
+    }
+
+    pub fn idle(&self) -> bool {
+        self.stage == Stage::Idle
+    }
+
+    /// Whether this reads `lattice`'s size of buffer.
+    pub fn fits(&self, lattice: &Lattice) -> bool {
+        (self.width, self.height) == (lattice.width, lattice.height)
+    }
+
+    /// Copies the cells as they will be at the end of `encoder`. Only when idle and fitting.
+    pub fn start(&mut self, encoder: &mut wgpu::CommandEncoder, lattice: &Lattice) {
+        debug_assert!(self.idle() && self.fits(lattice));
+        encoder.copy_buffer_to_buffer(&lattice.cells, 0, &self.buffer, 0, self.buffer.size());
+        self.stage = Stage::Copied;
+    }
+
+    /// Moves a read along; call once a frame. Returns the cells once they have arrived.
+    pub fn poll(&mut self, device: &wgpu::Device) -> Option<Vec<u32>> {
+        match self.stage {
+            Stage::Idle => None,
+            Stage::Copied => {
+                self.mapped.store(0, Ordering::Release);
+                let mapped = self.mapped.clone();
+                self.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    mapped.store(if r.is_ok() { 1 } else { 2 }, Ordering::Release)
+                });
+                self.stage = Stage::Mapping;
+                None
+            }
+            Stage::Mapping => {
+                // Natively, map callbacks run only when the device is polled; on the web, by themselves.
+                let _ = device.poll(wgpu::PollType::Poll);
+                match self.mapped.load(Ordering::Acquire) {
+                    0 => None,
+                    1 => {
+                        let words = self
+                            .buffer
+                            .slice(..)
+                            .get_mapped_range()
+                            .ok()
+                            .map(|bytes| bytes.as_chunks::<4>().0.iter().map(|&b| u32::from_le_bytes(b)).collect());
+                        self.buffer.unmap();
+                        self.stage = Stage::Idle;
+                        words
+                    }
+                    _ => {
+                        self.stage = Stage::Idle;
+                        None
+                    }
+                }
+            }
+        }
     }
 }
 
