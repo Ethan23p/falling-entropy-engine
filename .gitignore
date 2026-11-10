@@ -1,0 +1,4 @@
+/target
+/apps/*/dist
+# Local override of the engine git dependency (see AGENTS.md).
+/.cargo/config.toml

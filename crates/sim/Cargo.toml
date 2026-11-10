@@ -1,0 +1,8 @@
+[package]
+name = "sim"
+description = "The CPU reference simulation: rules, cell state and the counter-based hash. No GPU or platform dependencies."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

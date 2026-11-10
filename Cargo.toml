@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+# Keep dev builds of dependencies fast at runtime; our own code stays quick to compile.
+[profile.dev.package."*"]
+opt-level = 2
