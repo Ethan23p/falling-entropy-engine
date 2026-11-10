@@ -1,14 +1,15 @@
 # AGENTS.md
 
-Falling Sand Engine is v2 of Ethan's falling-sand game, in Rust + WebGPU. It grows one mechanic at a time on cellular-automaton primitives, from a two-material base (sand and air) toward field-mediated matter. It will be served by Ethan's games platform, [contra-ethos-games](https://github.com/Ethan23p/contra-ethos-games), but lives in its own repo.
+Falling Sand Engine is v2 of Ethan's falling-sand game, in Rust + WebGPU. It grows one mechanic (or feature: the same thing) at a time on cellular-automaton primitives, from a minimal base toward field-mediated matter. It will be served by Ethan's games platform, [contra-ethos-games](https://github.com/Ethan23p/contra-ethos-games), but lives in its own repo. v1 is [Phosphor-Sand](https://github.com/Ethan23p/Phosphor-Sand) (plain JS + WGSL, at sand.contra-ethos.com); borrow its dynamics freely.
 
-This file is for orientation and standing rules. It holds no status or history: what is being built lives in the doc, and what has been built lives in the git log.
+This file is for orientation and standing rules. It summarizes the **Process** section of the Falling Sand Engine tab, which wins if they disagree, and adds the commands and architecture. It holds no status or history: what is being built lives in the doc, and what has been built lives in the git log.
 
 ## Sources of truth
 
 1. **The doc is the authority:** the Claude Doc [Understanding Cellular Automata](https://claude.ai/artifact/QzVdJFygvriiRbGSj1xnau), read and written with the Claude Docs connector (load the docs skill first). Its tabs:
    - **Falling Sand Engine** is the backbone. If the code were lost, it should be enough to rebuild it.
-     - **Scope**: every feature we're working toward, the current version and its open questions, and a handful marked as the short-to-mid-term focus. A feature gets a version only once that version is being built.
+     - **Process**: how we work. Read it when a process question comes up; this file is its summary.
+     - **Scope**: every feature we're working toward, the current version and its open questions, and the Focus list: the next few, in order. A feature gets a version only once that version is being built.
      - **Primitives**: the entities, capabilities and policies that exist today.
      - If the code and the tab disagree, the tab wins. If the tab is silent, ask Ethan, then update the tab.
    - **Abstractions v1**: the vocabulary, written abstractly. Primitives are carried over from it as mechanics need them.
@@ -26,16 +27,17 @@ Ethan is the designer and owns the doc. Claude is the engineer and owns the code
 
 ## Workflow
 
-Each version targets one mechanic:
+Each version targets one mechanic, the next on the Focus list:
 
 1. Spec the mechanic in the tab: its primitives, plus open questions resolved with Ethan.
 2. Write failing tests, named after the primitive or policy they pin (`offer_*`, `transfer_*`, `conservation_*`).
 3. Implement until they pass.
-4. Make it playable: desktop and phone. Ethan plays on a phone.
+4. Make it playable on desktop and phone, even before it's fun. Ethan plays on a phone.
 5. Commit, with the version prefix.
 
 Keep it low-key:
 - Tests must stay fast. Compile times must stay low: few dependencies, and the sim crate has none.
+- The foundations (synchrony, the handshake, rendering) get the most care; everything builds on them.
 - Read only what the step needs. Don't re-read the whole doc each session.
 - Keep this file accurate when a rule or a command changes. Never put status here.
 
