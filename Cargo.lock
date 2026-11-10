@@ -2141,7 +2141,18 @@ name = "sand"
 version = "0.0.1"
 dependencies = [
  "engine",
+ "fontdue",
+ "image",
  "pollster",
+ "scenes",
+ "sim",
+ "web-sys",
+]
+
+[[package]]
+name = "scenes"
+version = "0.0.1"
+dependencies = [
  "sim",
 ]
 

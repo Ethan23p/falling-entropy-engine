@@ -9,6 +9,7 @@ publish = false
 
 [workspace.dependencies]
 sim = { path = "crates/sim" }
+scenes = { path = "crates/scenes" }
 # The shared platform layer, pinned. For local co-development, see AGENTS.md.
 engine = { git = "https://github.com/Ethan23p/contra-ethos-games", rev = "48210d5ebfbec0c580bc53f90055a10c5f850188" }
 pollster = "1"
@@ -20,4 +21,10 @@ codegen-units = 1
 
 # Keep dev builds of dependencies fast at runtime; our own code stays quick to compile.
 [profile.dev.package."*"]
+opt-level = 2
+# The reference sim drives the harness and the feel benchmark, which run thousands of phases;
+# it is small, so optimizing it costs little compile time.
+[profile.dev.package.sim]
+opt-level = 2
+[profile.dev.package.scenes]
 opt-level = 2

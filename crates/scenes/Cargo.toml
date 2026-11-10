@@ -1,0 +1,9 @@
+[package]
+name = "scenes"
+description = "Preset scenes, shared by the game and the harness: worlds built by code or painted in the game, and scripted brush input."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sim.workspace = true
