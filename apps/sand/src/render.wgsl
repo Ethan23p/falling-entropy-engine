@@ -13,7 +13,8 @@ struct View {
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<storage, read> cells: array<u32>;
 
-const OUTSIDE: vec3<f32> = vec3(0.031, 0.035, 0.047);
+// Outside the lattice is bedrock, so it draws as bedrock.
+const BEDROCK: vec3<f32> = vec3(0.031, 0.035, 0.047);
 const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
 const SAND: vec3<f32> = vec3(0.871, 0.718, 0.431);
 const SLATE: vec3<f32> = vec3(0.310, 0.345, 0.400);
@@ -31,8 +32,9 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let x = i32(floor(p.x));
     let y = i32(floor(p.y - 0.5 * f32(x & 1)));
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
-        return vec4(OUTSIDE, 1.0);
+        return vec4(BEDROCK, 1.0);
     }
     let material = cells[y * view.width + x] & 3u;
-    return vec4(select(select(AIR, SAND, material == 1u), SLATE, material == 2u), 1.0);
+    var colors = array<vec3<f32>, 4>(AIR, SAND, SLATE, BEDROCK);
+    return vec4(colors[material], 1.0);
 }

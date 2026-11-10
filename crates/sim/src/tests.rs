@@ -368,7 +368,7 @@ fn brush_erasing_a_grain_mid_handshake_creates_nothing() {
 #[test]
 fn encoding_state_round_trips() {
     // A cell holds at most one intent: sand may offer, air may accept, slate does neither.
-    let mut states = vec![State::holding(Material::Slate)];
+    let mut states = vec![State::holding(Material::Slate), State::holding(Material::Bedrock)];
     for d in [None, Some(Dir::Down), Some(Dir::UpLeft)] {
         states.push(State { material: Material::Sand, offer: d, accept: None });
         states.push(State { material: Material::Air, offer: None, accept: d });
@@ -448,32 +448,6 @@ fn slate_holds_sand_up() {
 }
 
 #[test]
-fn boundary_is_slate() {
-    // A world whose bottom row is slate evolves exactly like one a row shorter, whose floor
-    // is the boundary.
-    let (w, h) = (12, 8);
-    let mut open = scattered(w, h);
-    let mut walled = World::new(w, h + 1);
-    for y in 0..h {
-        for x in 0..w {
-            walled.paint(x, y, open.material(x, y));
-        }
-    }
-    for x in 0..w {
-        walled.paint(x, h, Material::Slate);
-    }
-    for phase in 0..120 {
-        open.step();
-        walled.step();
-        for y in 0..h {
-            for x in 0..w {
-                assert_eq!(open.cell(x, y), walled.cell(x, y), "({x},{y}) after {phase} phases");
-            }
-        }
-    }
-}
-
-#[test]
 fn conservation_slate_and_sand_counts_never_change() {
     let mut w = scattered(24, 24);
     for x in 4..20 {
@@ -510,4 +484,56 @@ fn brush_erases_slate() {
     let mut w = slate_world(4, 4, &[(1, 1)], &[]);
     w.paint(1, 1, Material::Air);
     assert_eq!(w.count(Material::Slate), 0);
+}
+
+// Bedrock
+
+#[test]
+fn bedrock_is_the_boundary() {
+    // A world with bedrock along its right side and floor evolves exactly like the bare world.
+    // (Shifting the world to frame the left and top too would change the hash's tie-breaks;
+    // every edge goes through the same out-of-bounds check.)
+    let (w, h) = (10, 8);
+    let mut open = World::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            if hash(x, y, 0, 13).is_multiple_of(2) {
+                open.paint(x, y, Material::Sand);
+            }
+        }
+    }
+    let mut framed = World::new(w + 1, h + 1);
+    for y in 0..h + 1 {
+        for x in 0..w + 1 {
+            let inside = x < w && y < h;
+            framed.paint(x, y, if inside { open.material(x, y) } else { Material::Bedrock });
+        }
+    }
+    for phase in 0..100 {
+        open.step();
+        framed.step();
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(open.cell(x, y), framed.cell(x, y), "({x},{y}) after {phase} phases");
+            }
+        }
+    }
+}
+
+#[test]
+fn bedrock_never_moves_offers_or_accepts() {
+    let bedrock = State::holding(Material::Bedrock);
+    let around = seen(&[(Dir::Up, offering(Dir::Down))]);
+    assert_eq!(next(bedrock, around, 2, 2, 0), bedrock);
+    let below = seen(&[(Dir::Down, bedrock), (Dir::DownLeft, bedrock), (Dir::DownRight, bedrock)]);
+    assert_eq!(next(State::holding(Material::Sand), below, 2, 2, 0).offer, None);
+}
+
+#[test]
+fn brush_cannot_erase_bedrock() {
+    let mut w = World::new(4, 4);
+    w.paint(1, 1, Material::Bedrock);
+    w.paint(1, 1, Material::Air);
+    w.stamp(1.0, 1.0, 3.0, Material::Air);
+    assert_eq!(w.material(1, 1), Material::Bedrock);
 }

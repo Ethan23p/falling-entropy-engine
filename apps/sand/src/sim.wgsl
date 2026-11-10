@@ -2,9 +2,9 @@
 // `World::paint`). Keep the two identical; the GPU parity test checks them bit for bit.
 //
 // A cell's word: state (bits 0-4), kept-back value (bits 5-9), phase (bits 10-31).
-// A state: material (bits 0-1: 0 air, 1 sand, 2 slate), then one intent (bits 2-4): sand's
+// A state: material (bits 0-1: 0 air, 1 sand, 2 slate, 3 bedrock), then one intent (bits 2-4): sand's
 // offer or air's acceptance, stored as 1 + a direction's index, 0 meaning none.
-// Outside the lattice reads as slate.
+// Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
 struct Params {
@@ -34,6 +34,7 @@ const PHASE_MASK: u32 = 0x3fffffu;
 const AIR: u32 = 0u;
 const SAND: u32 = 1u;
 const SLATE: u32 = 2u;
+const BEDROCK: u32 = 3u;
 const SALT_OFFER: u32 = 1u;
 const SALT_ACCEPT: u32 = 2u;
 
@@ -172,7 +173,7 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
         }
         return SAND | (new_offer << 2u);
     }
-    return SLATE;
+    return material; // slate and bedrock never change
 }
 
 // One phase for one cell (`World::update`). Cells run in any order and in place: a neighbor
@@ -187,7 +188,7 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = y * params.width + x;
     let word = atomicLoad(&cells[i]);
     let phase = word >> PHASE_SHIFT;
-    var seen = array<u32, 6>(SLATE, SLATE, SLATE, SLATE, SLATE, SLATE);
+    var seen = array<u32, 6>(BEDROCK, BEDROCK, BEDROCK, BEDROCK, BEDROCK, BEDROCK);
     for (var d = 0u; d < 6u; d++) {
         let n = neighbor(x, y, d);
         if n.x < 0 || n.y < 0 || n.x >= params.width || n.y >= params.height {
@@ -209,7 +210,8 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // The brush (`World::paint`), between phases: every cell inside a stamp holds its material
-// and nothing in flight. Matter goes only into cells holding air; erasing goes anywhere.
+// and nothing in flight. Matter goes only into cells holding air; erasing clears anything
+// but bedrock.
 // Stamps apply in order.
 @compute @workgroup_size(8, 8)
 fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -228,7 +230,7 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         let material = u32(stamp.material);
         let off = centre - vec2(stamp.x, stamp.y);
         if off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius
-            && (material == AIR || material_of(state) == AIR) {
+            && select(material_of(state) == AIR, material_of(state) != BEDROCK, material == AIR) {
             state = material;
             painted = true;
         }

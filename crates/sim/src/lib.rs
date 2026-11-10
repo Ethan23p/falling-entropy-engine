@@ -2,7 +2,7 @@
 //! and is tested natively; the WGSL compute shaders mirror it bit for bit.
 //!
 //! Names follow the Primitives section of the Falling Sand Engine tab:
-//! a column-offset hexagonal lattice of cells, each holding sand, slate or air,
+//! a column-offset hexagonal lattice of cells, each holding sand, slate, bedrock or air,
 //! advanced by synchronizer-phasing, moving sand by a directed handshake
 //! (offer → accept → transfer) at reach 1 with self-writes only.
 
@@ -86,8 +86,10 @@ pub enum Material {
     /// Not matter: what a cell holds when it holds no matter.
     Air = 0,
     Sand = 1,
-    /// Solid matter that never moves. Outside the lattice is slate too.
+    /// Solid matter that never moves.
     Slate = 2,
+    /// Slate that can't be erased. Outside the lattice is bedrock.
+    Bedrock = 3,
 }
 
 /// What a cell holds this phase.
@@ -103,12 +105,13 @@ pub struct State {
 impl State {
     pub const AIR: State = State { material: Material::Air, offer: None, accept: None };
     pub const SLATE: State = State { material: Material::Slate, offer: None, accept: None };
+    pub const BEDROCK: State = State { material: Material::Bedrock, offer: None, accept: None };
 
     pub fn holding(material: Material) -> State {
         State { material, offer: None, accept: None }
     }
 
-    /// 5 bits: material (bits 0-1: 0 air, 1 sand, 2 slate), then one intent (bits 2-4), stored
+    /// 5 bits: material (bits 0-1: 0 air, 1 sand, 2 slate, 3 bedrock), then one intent (bits 2-4), stored
     /// as 1 + a direction's index. A cell holds at most one intent: sand's offer or air's acceptance.
     pub fn encode(self) -> u32 {
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
@@ -121,7 +124,8 @@ impl State {
         match bits & 3 {
             0 => State { material: Material::Air, offer: None, accept: intent },
             1 => State { material: Material::Sand, offer: intent, accept: None },
-            _ => State::SLATE,
+            2 => State::SLATE,
+            _ => State::BEDROCK,
         }
     }
 }
@@ -129,7 +133,7 @@ impl State {
 // The rule
 
 /// One cell's update: its next state from its own state and what it sees around it, all at
-/// the same phase (outside the lattice reads as slate). Every cell computes only itself, so
+/// the same phase (outside the lattice reads as bedrock). Every cell computes only itself, so
 /// the two halves of a transfer agree because they read the same snapshot.
 pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32) -> State {
     let at = |d: Dir| seen[d as usize];
@@ -178,7 +182,7 @@ pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32) -> State {
                 s.offer = pick(open, |d| drop(x, y, d), hash(x, y, phase, SALT_OFFER));
             }
         }
-        Material::Slate => {}
+        Material::Slate | Material::Bedrock => {}
     }
     s
 }
@@ -267,10 +271,12 @@ impl World {
     }
 
     /// The brush, the one source and sink of matter: the cell now holds `material` and nothing
-    /// in flight. Matter goes only into a cell holding air; air (erasing) goes anywhere. Call it
-    /// between phases.
+    /// in flight. Matter goes only into a cell holding air; erasing (painting air) clears anything
+    /// but bedrock. Call it between phases.
     pub fn paint(&mut self, x: i32, y: i32, material: Material) {
-        if material != Material::Air && self.material(x, y) != Material::Air {
+        let here = self.material(x, y);
+        let allowed = if material == Material::Air { here != Material::Bedrock } else { here == Material::Air };
+        if !allowed {
             return;
         }
         let i = self.index(x, y);
@@ -296,7 +302,7 @@ impl World {
     pub fn update(&mut self, x: i32, y: i32) -> bool {
         let word = self.cells[self.index(x, y)];
         let phase = word >> PHASE_SHIFT;
-        let mut seen = [State::SLATE; 6];
+        let mut seen = [State::BEDROCK; 6];
         for d in Dir::ALL {
             let (nx, ny) = neighbor(x, y, d);
             if !self.in_bounds(nx, ny) {
