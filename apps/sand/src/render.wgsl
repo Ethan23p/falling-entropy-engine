@@ -16,6 +16,7 @@ struct View {
 const OUTSIDE: vec3<f32> = vec3(0.031, 0.035, 0.047);
 const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
 const SAND: vec3<f32> = vec3(0.871, 0.718, 0.431);
+const SLATE: vec3<f32> = vec3(0.310, 0.345, 0.400);
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -32,6 +33,6 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(OUTSIDE, 1.0);
     }
-    let sand = (cells[y * view.width + x] & 1u) == 1u;
-    return vec4(select(AIR, SAND, sand), 1.0);
+    let material = cells[y * view.width + x] & 3u;
+    return vec4(select(select(AIR, SAND, material == 1u), SLATE, material == 2u), 1.0);
 }

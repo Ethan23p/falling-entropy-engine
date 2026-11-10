@@ -12,7 +12,7 @@ pub struct Stamp {
     pub x: f32,
     pub y: f32,
     pub radius: f32,
-    pub sand: bool,
+    pub material: sim::Material,
 }
 
 /// Pipelines: made once per device and target format.
@@ -152,8 +152,7 @@ impl Lattice {
         queue.write_buffer(&self.params, 0, &words(&params));
         let (gx, gy) = self.groups();
         if !stamps.is_empty() {
-            let data: Vec<f32> =
-                stamps.iter().flat_map(|s| [s.x, s.y, s.radius, if s.sand { 1.0 } else { 0.0 }]).collect();
+            let data: Vec<f32> = stamps.iter().flat_map(|s| [s.x, s.y, s.radius, s.material as u32 as f32]).collect();
             queue.write_buffer(&self.stamps, 0, &floats(&data));
             let mut pass = encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("brush"), timestamp_writes: None });
@@ -217,6 +216,9 @@ mod tests {
 
         let (w, h) = (61, 47);
         let mut world = World::new(w, h);
+        for x in 5..40 {
+            world.paint(x, 30 - x / 3, Material::Slate);
+        }
         for y in 0..h * 2 / 3 {
             for x in 0..w {
                 if sim::hash(x, y, 0, 77).is_multiple_of(3) {
@@ -258,5 +260,36 @@ mod tests {
             let first = gpu.iter().zip(world.words()).position(|(a, b)| a != b);
             assert_eq!(first, None, "after {phase} phases, first mismatch at cell {first:?}");
         }
+
+        // The brush, in the middle of motion: matter only into air, erasing anywhere, in order.
+        let stamps = [
+            Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Slate },
+            Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },
+            Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Air },
+            Stamp { x: 45.0, y: 20.0, radius: 5.5, material: Material::Slate },
+        ];
+        for s in &stamps {
+            world.stamp(s.x, s.y, s.radius, s.material);
+        }
+        for _ in 0..30 {
+            world.step();
+        }
+        let mut encoder = device.create_command_encoder(&Default::default());
+        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30);
+        encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4) as u64);
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
+        device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let gpu: Vec<u32> = slice
+            .get_mapped_range()
+            .expect("mapped")
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| u32::from_le_bytes(b))
+            .collect();
+        let first = gpu.iter().zip(world.words()).position(|(a, b)| a != b);
+        assert_eq!(first, None, "after the brush, first mismatch at cell {first:?}");
     }
 }

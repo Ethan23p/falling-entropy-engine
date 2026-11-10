@@ -1,9 +1,10 @@
 // The sim on the GPU: a line-for-line mirror of crates/sim (`next`, `World::update`,
 // `World::paint`). Keep the two identical; the GPU parity test checks them bit for bit.
 //
-// A cell's word: state (bits 0-6), kept-back value (bits 7-13), phase (bits 14-31).
-// A state: material (bit 0: 0 air, 1 sand), offer (bits 1-3), accept (bits 4-6);
-// a direction is stored as 1 + its index, 0 meaning none.
+// A cell's word: state (bits 0-4), kept-back value (bits 5-9), phase (bits 10-31).
+// A state: material (bits 0-1: 0 air, 1 sand, 2 slate), then one intent (bits 2-4): sand's
+// offer or air's acceptance, stored as 1 + a direction's index, 0 meaning none.
+// Outside the lattice reads as slate.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
 struct Params {
@@ -13,7 +14,8 @@ struct Params {
     _pad: u32,
 }
 
-// A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material.
+// A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
+// (0 air, 1 sand, 2 slate).
 struct Stamp {
     x: f32,
     y: f32,
@@ -25,12 +27,13 @@ struct Stamp {
 @group(0) @binding(1) var<storage, read_write> cells: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read> stamps: array<Stamp>;
 
-const STATE_BITS: u32 = 7u;
-const STATE_MASK: u32 = 127u;
-const PHASE_SHIFT: u32 = 14u;
-const PHASE_MASK: u32 = 0x3ffffu;
-const SOLID: u32 = 0xffffffffu;
+const STATE_BITS: u32 = 5u;
+const STATE_MASK: u32 = 31u;
+const PHASE_SHIFT: u32 = 10u;
+const PHASE_MASK: u32 = 0x3fffffu;
+const AIR: u32 = 0u;
 const SAND: u32 = 1u;
+const SLATE: u32 = 2u;
 const SALT_OFFER: u32 = 1u;
 const SALT_ACCEPT: u32 = 2u;
 
@@ -72,12 +75,16 @@ fn opposite(d: u32) -> u32 {
     return (d + 3u) % 6u;
 }
 
+fn material_of(s: u32) -> u32 {
+    return s & 3u;
+}
+
 fn offer_of(s: u32) -> u32 {
-    return (s >> 1u) & 7u;
+    return select(0u, (s >> 2u) & 7u, material_of(s) == SAND);
 }
 
 fn accept_of(s: u32) -> u32 {
-    return (s >> 4u) & 7u;
+    return select(0u, (s >> 2u) & 7u, material_of(s) == AIR);
 }
 
 // `pick` in crates/sim: the candidate with the highest key, equals chosen by `bits`.
@@ -113,13 +120,12 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
     // Transfer, the giving half.
     if offer != 0u {
         let d = offer - 1u;
-        let n = (*seen)[d];
-        if n != SOLID && accept_of(n) == opposite(d) + 1u {
-            return 0u;
+        if accept_of((*seen)[d]) == opposite(d) + 1u {
+            return AIR;
         }
     }
 
-    var material = me & 1u;
+    var material = material_of(me);
     var new_offer = offer;
     var new_accept = accept;
     // Transfer, the receiving half.
@@ -127,28 +133,29 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
         new_accept = 0u;
         let d = accept - 1u;
         let n = (*seen)[d];
-        if n != SOLID && offer_of(n) == opposite(d) + 1u {
-            material = n & 1u;
+        if offer_of(n) == opposite(d) + 1u {
+            material = material_of(n);
         }
     }
 
-    if material == 0u {
+    if material == AIR {
         if accept == 0u {
             var p = Picker(array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u), 0u, -2147483647 - 1);
             for (var d = 0u; d < 6u; d++) {
                 let n = (*seen)[d];
-                if n != SOLID && (n & 1u) == SAND && offer_of(n) == opposite(d) + 1u {
+                if material_of(n) == SAND && offer_of(n) == opposite(d) + 1u {
                     consider(&p, d, -fall(x, y, d));
                 }
             }
             new_accept = chosen(&p, hash(x, y, phase, SALT_ACCEPT));
         }
-    } else {
-        new_accept = 0u;
+        return AIR | (new_accept << 2u);
+    }
+    if material == SAND {
         if new_offer != 0u {
             let d = new_offer - 1u;
             let n = (*seen)[d];
-            let open = n != SOLID && (n & 1u) == 0u && (accept_of(n) == 0u || accept_of(n) == opposite(d) + 1u);
+            let open = material_of(n) == AIR && (accept_of(n) == 0u || accept_of(n) == opposite(d) + 1u);
             if !open {
                 new_offer = 0u;
             }
@@ -157,14 +164,15 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
             var p = Picker(array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u), 0u, -2147483647 - 1);
             for (var d = 0u; d < 6u; d++) {
                 let n = (*seen)[d];
-                if fall(x, y, d) > 0 && n != SOLID && (n & 1u) == 0u && accept_of(n) == 0u {
+                if fall(x, y, d) > 0 && material_of(n) == AIR && accept_of(n) == 0u {
                     consider(&p, d, fall(x, y, d));
                 }
             }
             new_offer = chosen(&p, hash(x, y, phase, SALT_OFFER));
         }
+        return SAND | (new_offer << 2u);
     }
-    return material | (new_offer << 1u) | (new_accept << 4u);
+    return SLATE;
 }
 
 // One phase for one cell (`World::update`). Cells run in any order and in place: a neighbor
@@ -179,7 +187,7 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = y * params.width + x;
     let word = atomicLoad(&cells[i]);
     let phase = word >> PHASE_SHIFT;
-    var seen = array<u32, 6>(SOLID, SOLID, SOLID, SOLID, SOLID, SOLID);
+    var seen = array<u32, 6>(SLATE, SLATE, SLATE, SLATE, SLATE, SLATE);
     for (var d = 0u; d < 6u; d++) {
         let n = neighbor(x, y, d);
         if n.x < 0 || n.y < 0 || n.x >= params.width || n.y >= params.height {
@@ -201,7 +209,8 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // The brush (`World::paint`), between phases: every cell inside a stamp holds its material
-// and nothing in flight. Later stamps win.
+// and nothing in flight. Matter goes only into cells holding air; erasing goes anywhere.
+// Stamps apply in order.
 @compute @workgroup_size(8, 8)
 fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
@@ -210,18 +219,22 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let centre = vec2(f32(x), f32(y) + 0.5 * f32(x & 1));
-    var painted = -1;
+    let i = y * params.width + x;
+    let word = atomicLoad(&cells[i]);
+    var state = word & STATE_MASK;
+    var painted = false;
     for (var s = 0u; s < params.stamps; s++) {
         let stamp = stamps[s];
-        if distance(centre, vec2(stamp.x, stamp.y)) <= stamp.radius {
-            painted = i32(stamp.material);
+        let material = u32(stamp.material);
+        let off = centre - vec2(stamp.x, stamp.y);
+        if off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius
+            && (material == AIR || material_of(state) == AIR) {
+            state = material;
+            painted = true;
         }
     }
-    if painted < 0 {
+    if !painted {
         return;
     }
-    let i = y * params.width + x;
-    let phase = atomicLoad(&cells[i]) >> PHASE_SHIFT;
-    let state = u32(painted);
-    atomicStore(&cells[i], state | (state << STATE_BITS) | (phase << PHASE_SHIFT));
+    atomicStore(&cells[i], state | (state << STATE_BITS) | ((word >> PHASE_SHIFT) << PHASE_SHIFT));
 }

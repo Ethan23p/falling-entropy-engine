@@ -145,10 +145,10 @@ fn accept_air_accepts_the_offer_it_sees() {
 }
 
 /// What a cell sees: air all around, except the given neighbors.
-fn seen(with: &[(Dir, State)]) -> [Seen; 6] {
-    let mut out = [Seen::Cell(State::AIR); 6];
+fn seen(with: &[(Dir, State)]) -> [State; 6] {
+    let mut out = [State::AIR; 6];
     for &(d, s) in with {
-        out[d as usize] = Seen::Cell(s);
+        out[d as usize] = s;
     }
     out
 }
@@ -186,8 +186,8 @@ fn offer_withdrawn_when_the_target_accepts_another() {
     let me = offering(Dir::DownRight);
     let target = State { material: Material::Air, offer: None, accept: Some(Dir::Up) };
     // Everything else around is sand, so there is nowhere else to offer.
-    let mut around = [Seen::Cell(State { material: Material::Sand, offer: None, accept: None }); 6];
-    around[Dir::DownRight as usize] = Seen::Cell(target);
+    let mut around = [State::holding(Material::Sand); 6];
+    around[Dir::DownRight as usize] = target;
     assert_eq!(next(me, around, 2, 2, 0).offer, None);
 }
 
@@ -367,12 +367,147 @@ fn brush_erasing_a_grain_mid_handshake_creates_nothing() {
 
 #[test]
 fn encoding_state_round_trips() {
-    for material in [Material::Air, Material::Sand] {
-        for offer in [None, Some(Dir::Down), Some(Dir::UpLeft)] {
-            for accept in [None, Some(Dir::Up), Some(Dir::DownRight)] {
-                let s = State { material, offer, accept };
-                assert_eq!(State::decode(s.encode()), s);
+    // A cell holds at most one intent: sand may offer, air may accept, slate does neither.
+    let mut states = vec![State::holding(Material::Slate)];
+    for d in [None, Some(Dir::Down), Some(Dir::UpLeft)] {
+        states.push(State { material: Material::Sand, offer: d, accept: None });
+        states.push(State { material: Material::Air, offer: None, accept: d });
+    }
+    for s in states {
+        assert_eq!(State::decode(s.encode()), s);
+    }
+}
+
+#[test]
+fn encoding_phase_has_22_bits() {
+    assert_eq!(PHASE_MASK, (1 << 22) - 1);
+}
+
+// Slate
+
+const SLATE: State = State { material: Material::Slate, offer: None, accept: None };
+
+fn slate_world(w: i32, h: i32, slate: &[(i32, i32)], sand: &[(i32, i32)]) -> World {
+    let mut world = World::new(w, h);
+    for &(x, y) in slate {
+        world.paint(x, y, Material::Slate);
+    }
+    for &(x, y) in sand {
+        world.paint(x, y, Material::Sand);
+    }
+    world
+}
+
+#[test]
+fn slate_never_moves() {
+    let slate = [(2, 1), (3, 1), (2, 2)];
+    let mut w = slate_world(6, 8, &slate, &[]);
+    for _ in 0..50 {
+        w.step();
+    }
+    for y in 0..8 {
+        for x in 0..6 {
+            let expect = if slate.contains(&(x, y)) { Material::Slate } else { Material::Air };
+            assert_eq!(w.material(x, y), expect, "({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn slate_never_offers_or_accepts() {
+    let around = seen(&[(Dir::Up, offering(Dir::Down))]);
+    for phase in 0..8 {
+        assert_eq!(next(SLATE, around, 2, 2, phase), SLATE);
+    }
+}
+
+#[test]
+fn offer_sand_never_offers_to_slate() {
+    let walled = seen(&[(Dir::Down, SLATE), (Dir::DownLeft, SLATE), (Dir::DownRight, SLATE)]);
+    assert_eq!(next(State::holding(Material::Sand), walled, 2, 2, 0).offer, None);
+    let gap = seen(&[(Dir::Down, SLATE), (Dir::DownRight, SLATE)]);
+    assert_eq!(next(State::holding(Material::Sand), gap, 2, 2, 0).offer, Some(Dir::DownLeft));
+}
+
+#[test]
+fn slate_holds_sand_up() {
+    // A shelf of slate across the middle: sand dropped on it rests on it.
+    let shelf: Vec<_> = (0..7).map(|x| (x, 4)).collect();
+    let mut w = slate_world(7, 8, &shelf, &[(3, 0)]);
+    for _ in 0..60 {
+        w.step();
+    }
+    let sand = sand_at(&w);
+    assert_eq!(sand.len(), 1);
+    let (x, y) = sand[0];
+    assert!(y < 4, "sand at ({x},{y}) went through the shelf");
+    assert!(Dir::ALL.into_iter().filter(|&d| drop(x, y, d) > 0).all(|d| {
+        let (nx, ny) = neighbor(x, y, d);
+        w.material(nx, ny) == Material::Slate
+    }));
+}
+
+#[test]
+fn boundary_is_slate() {
+    // A world whose bottom row is slate evolves exactly like one a row shorter, whose floor
+    // is the boundary.
+    let (w, h) = (12, 8);
+    let mut open = scattered(w, h);
+    let mut walled = World::new(w, h + 1);
+    for y in 0..h {
+        for x in 0..w {
+            walled.paint(x, y, open.material(x, y));
+        }
+    }
+    for x in 0..w {
+        walled.paint(x, h, Material::Slate);
+    }
+    for phase in 0..120 {
+        open.step();
+        walled.step();
+        for y in 0..h {
+            for x in 0..w {
+                assert_eq!(open.cell(x, y), walled.cell(x, y), "({x},{y}) after {phase} phases");
             }
         }
     }
+}
+
+#[test]
+fn conservation_slate_and_sand_counts_never_change() {
+    let mut w = scattered(24, 24);
+    for x in 4..20 {
+        w.paint(x, 16, Material::Slate);
+    }
+    let (sand, slate) = (w.count(Material::Sand), w.count(Material::Slate));
+    for _ in 0..300 {
+        w.step();
+        assert_eq!((w.count(Material::Sand), w.count(Material::Slate)), (sand, slate));
+    }
+}
+
+#[test]
+fn brush_paints_only_into_air() {
+    let mut w = World::new(4, 4);
+    w.paint(1, 1, Material::Sand);
+    w.paint(1, 1, Material::Slate);
+    assert_eq!(w.material(1, 1), Material::Sand, "slate does not replace sand");
+    w.paint(2, 2, Material::Slate);
+    w.paint(2, 2, Material::Sand);
+    assert_eq!(w.material(2, 2), Material::Slate, "sand does not replace slate");
+}
+
+#[test]
+fn brush_stamp_covers_a_disc_of_centres() {
+    let mut w = World::new(9, 9);
+    w.stamp(4.0, 4.0, 1.2, Material::Sand);
+    // Even column 4: (4,3), (4,4), (4,5); odd columns 3 and 5 sit half a cell lower: rows 3 and 4.
+    assert_eq!(sand_at(&w), vec![(3, 3), (4, 3), (5, 3), (3, 4), (4, 4), (5, 4), (4, 5)]);
+}
+
+#[test]
+fn brush_erases_slate() {
+    let mut w = slate_world(4, 4, &[(1, 1)], &[]);
+    w.paint(1, 1, Material::Air);
+    assert_eq!(w.count(Material::Slate), 0);
 }

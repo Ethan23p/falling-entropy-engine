@@ -1,5 +1,6 @@
-//! Falling Sand Engine, v00.01: sand and air. The lattice lives on the GPU; the brush paints
-//! and erases sand; the config panel tunes the rates, the cell size and the brush.
+//! Falling Sand Engine, v00.02: sand, slate and air. The lattice lives on the GPU; the brush
+//! paints sand or slate into air and erases; the config panel tunes the rates, the cell size
+//! and the brush.
 //!
 //! Native: `cargo run -p sand`, or `cargo run -p sand -- --snapshot out.png` for a headless
 //! strip of a seeded scene settling. Web: `trunk serve` from this folder.
@@ -38,7 +39,7 @@ impl Tunable for Config {
             |c| &mut c.max_phases,
         );
         s.group("Lattice").float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size);
-        s.group("Brush").choice("tool", "Tool", &["Sand", "Erase"], |c| &mut c.tool).float(
+        s.group("Brush").choice("tool", "Tool", &["Sand", "Slate", "Erase"], |c| &mut c.tool).float(
             "brush_radius",
             "Radius",
             "cells",
@@ -92,7 +93,8 @@ impl Game {
 
     fn stamp(&mut self, at: Vec2) {
         let c = &self.tuner.current;
-        self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, sand: c.tool == 0 });
+        let material = [Material::Sand, Material::Slate, Material::Air][c.tool.min(2)];
+        self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, material });
     }
 
     /// Stamps along a stroke, close enough that it leaves no gaps.
@@ -155,8 +157,13 @@ impl App for Game {
             // The lattice is sized once, to fill the screen at this cell size; later
             // resizes scale it to fit rather than rebuilding it.
             let px = cell_size * frame.scale;
-            let width = ((frame.size.x / px) as i32).max(2);
-            let height = ((frame.size.y / px - 0.5) as i32).max(2);
+            let width = (frame.size.x / px) as i32;
+            let height = (frame.size.y / px - 0.5) as i32;
+            if width < 8 || height < 8 {
+                // Not laid out yet (a hidden or collapsed page reports a tiny viewport): wait,
+                // rather than build a lattice a few cells across that later resizes only stretch.
+                return false;
+            }
             let mut world = World::new(width, height);
             (self.seed)(&mut world);
             self.lattice = Some(Lattice::new(gpu.device, pipelines, &world));
@@ -190,10 +197,19 @@ impl App for Game {
     }
 }
 
-/// The snapshot scene: a scattering over the top half and a solid block, left to settle.
+/// The snapshot scene: a slate funnel under a scattering and a solid block, left to settle.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn scene(world: &mut World) {
     let (w, h) = (world.width(), world.height());
+    // Two slate ramps sloping in toward a gap in the middle, two thirds of the way down. Each
+    // walks from the gap along up-diagonal neighbors, so it has no holes.
+    for (start, d) in [(w / 2 + 3, sim::Dir::UpRight), (w / 2 - 3, sim::Dir::UpLeft)] {
+        let (mut x, mut y) = (start, h * 2 / 3);
+        while world.in_bounds(x, y) && (x - w / 2).abs() < w / 2 - 2 {
+            world.paint(x, y, Material::Slate);
+            (x, y) = sim::neighbor(x, y, d);
+        }
+    }
     for y in 0..h / 2 {
         for x in 0..w {
             let block = (w / 3..w / 2).contains(&x) && y < h / 4;

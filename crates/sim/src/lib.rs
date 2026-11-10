@@ -2,7 +2,7 @@
 //! and is tested natively; the WGSL compute shaders mirror it bit for bit.
 //!
 //! Names follow the Primitives section of the Falling Sand Engine tab:
-//! a column-offset hexagonal lattice of cells, each holding sand or air,
+//! a column-offset hexagonal lattice of cells, each holding sand, slate or air,
 //! advanced by synchronizer-phasing, moving sand by a directed handshake
 //! (offer → accept → transfer) at reach 1 with self-writes only.
 
@@ -79,11 +79,15 @@ const SALT_ACCEPT: u32 = 2;
 
 // Cell state
 
+/// The discriminants are the encoded values, shared with the shaders.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum Material {
     /// Not matter: what a cell holds when it holds no matter.
-    Air,
-    Sand,
+    Air = 0,
+    Sand = 1,
+    /// Solid matter that never moves. Outside the lattice is slate too.
+    Slate = 2,
 }
 
 /// What a cell holds this phase.
@@ -98,49 +102,41 @@ pub struct State {
 
 impl State {
     pub const AIR: State = State { material: Material::Air, offer: None, accept: None };
+    pub const SLATE: State = State { material: Material::Slate, offer: None, accept: None };
 
     pub fn holding(material: Material) -> State {
         State { material, offer: None, accept: None }
     }
 
-    /// 7 bits: material (bit 0), offer (bits 1-3), accept (bits 4-6); a direction is stored as 1 + its index.
+    /// 5 bits: material (bits 0-1: 0 air, 1 sand, 2 slate), then one intent (bits 2-4), stored
+    /// as 1 + a direction's index. A cell holds at most one intent: sand's offer or air's acceptance.
     pub fn encode(self) -> u32 {
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
-        (self.material == Material::Sand) as u32 | dir(self.offer) << 1 | dir(self.accept) << 4
+        self.material as u32 | dir(self.offer.or(self.accept)) << 2
     }
 
     pub fn decode(bits: u32) -> State {
-        let dir = |v: u32| (v != 0).then(|| Dir::ALL[(v - 1) as usize % 6]);
-        State {
-            material: if bits & 1 == 1 { Material::Sand } else { Material::Air },
-            offer: dir(bits >> 1 & 7),
-            accept: dir(bits >> 4 & 7),
+        let v = bits >> 2 & 7;
+        let intent = (v != 0).then(|| Dir::ALL[(v - 1) as usize % 6]);
+        match bits & 3 {
+            0 => State { material: Material::Air, offer: None, accept: intent },
+            1 => State { material: Material::Sand, offer: intent, accept: None },
+            _ => State::SLATE,
         }
     }
-}
-
-/// What a cell sees toward one direction, at its own phase.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Seen {
-    /// Outside the lattice: matter that never moves.
-    Solid,
-    Cell(State),
 }
 
 // The rule
 
 /// One cell's update: its next state from its own state and what it sees around it, all at
-/// the same phase. Every cell computes only itself, so the two halves of a transfer agree
-/// because they read the same snapshot.
-pub fn next(me: State, seen: [Seen; 6], x: i32, y: i32, phase: u32) -> State {
-    let at = |d: Dir| match seen[d as usize] {
-        Seen::Cell(s) => Some(s),
-        Seen::Solid => None,
-    };
+/// the same phase (outside the lattice reads as slate). Every cell computes only itself, so
+/// the two halves of a transfer agree because they read the same snapshot.
+pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32) -> State {
+    let at = |d: Dir| seen[d as usize];
 
     // Transfer, the giving half: my offer was accepted, so I hold air.
     if let Some(d) = me.offer
-        && at(d).is_some_and(|n| n.accept == Some(d.opposite()))
+        && at(d).accept == Some(d.opposite())
     {
         return State::AIR;
     }
@@ -149,7 +145,8 @@ pub fn next(me: State, seen: [Seen; 6], x: i32, y: i32, phase: u32) -> State {
     // Transfer, the receiving half: the offer I accepted still stands, so I take its matter.
     if let Some(d) = me.accept {
         s.accept = None;
-        if let Some(n) = at(d).filter(|n| n.offer == Some(d.opposite())) {
+        let n = at(d);
+        if n.offer == Some(d.opposite()) {
             s.material = n.material;
         }
     }
@@ -160,28 +157,28 @@ pub fn next(me: State, seen: [Seen; 6], x: i32, y: i32, phase: u32) -> State {
                 // Accept: the steepest offer aimed at me wins; ties are hashed.
                 let offers = Dir::ALL
                     .into_iter()
-                    .filter(|&d| at(d).is_some_and(|n| n.material == Material::Sand && n.offer == Some(d.opposite())));
+                    .filter(|&d| at(d).material == Material::Sand && at(d).offer == Some(d.opposite()));
                 s.accept = pick(offers, |d| -drop(x, y, d), hash(x, y, phase, SALT_ACCEPT));
             }
         }
         Material::Sand => {
             // An offer stands while its target holds air and hasn't accepted someone else.
             if let Some(d) = s.offer {
-                let open = at(d).is_some_and(|n| {
-                    n.material == Material::Air && (n.accept.is_none() || n.accept == Some(d.opposite()))
-                });
+                let n = at(d);
+                let open = n.material == Material::Air && (n.accept.is_none() || n.accept == Some(d.opposite()));
                 if !open {
                     s.offer = None;
                 }
             }
             if s.offer.is_none() {
                 // Offer: the steepest downhill neighbor holding air and free to accept; ties are hashed.
-                let open = Dir::ALL.into_iter().filter(|&d| {
-                    drop(x, y, d) > 0 && at(d).is_some_and(|n| n.material == Material::Air && n.accept.is_none())
-                });
+                let open = Dir::ALL
+                    .into_iter()
+                    .filter(|&d| drop(x, y, d) > 0 && at(d).material == Material::Air && at(d).accept.is_none());
                 s.offer = pick(open, |d| drop(x, y, d), hash(x, y, phase, SALT_OFFER));
             }
         }
+        Material::Slate => {}
     }
     s
 }
@@ -208,10 +205,10 @@ fn pick(candidates: impl Iterator<Item = Dir>, key: impl Fn(Dir) -> i32, bits: u
 // The world
 
 /// Bits of a cell's word: its state, its kept-back value and its phase.
-const STATE_BITS: u32 = 7;
+const STATE_BITS: u32 = 5;
 const STATE_MASK: u32 = (1 << STATE_BITS) - 1;
 const PHASE_SHIFT: u32 = 2 * STATE_BITS;
-/// The phase is stored in the remaining 18 bits and wraps; neighbors are never more than one apart.
+/// The phase is stored in the remaining 22 bits and wraps; neighbors are never more than one apart.
 pub const PHASE_MASK: u32 = (1 << (32 - PHASE_SHIFT)) - 1;
 
 fn pack(state: State, kept_back: State, phase: u32) -> u32 {
@@ -270,11 +267,28 @@ impl World {
     }
 
     /// The brush, the one source and sink of matter: the cell now holds `material` and nothing
-    /// in flight. Call it between phases.
+    /// in flight. Matter goes only into a cell holding air; air (erasing) goes anywhere. Call it
+    /// between phases.
     pub fn paint(&mut self, x: i32, y: i32, material: Material) {
+        if material != Material::Air && self.material(x, y) != Material::Air {
+            return;
+        }
         let i = self.index(x, y);
         let s = State::holding(material);
         self.cells[i] = pack(s, s, self.cells[i] >> PHASE_SHIFT);
+    }
+
+    /// One brush stamp: `paint` every cell whose centre lies within `radius` of `(cx, cy)`, in
+    /// cell units, where a cell's centre is `(x, y + 0.5)` in odd columns and `(x, y)` in even ones.
+    pub fn stamp(&mut self, cx: f32, cy: f32, radius: f32, material: Material) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let (dx, dy) = (x as f32 - cx, y as f32 + 0.5 * (x & 1) as f32 - cy);
+                if dx * dx + dy * dy <= radius * radius {
+                    self.paint(x, y, material);
+                }
+            }
+        }
     }
 
     /// Evaluate one cell. It advances one phase unless a neighbor is still behind it, reading
@@ -282,7 +296,7 @@ impl World {
     pub fn update(&mut self, x: i32, y: i32) -> bool {
         let word = self.cells[self.index(x, y)];
         let phase = word >> PHASE_SHIFT;
-        let mut seen = [Seen::Solid; 6];
+        let mut seen = [State::SLATE; 6];
         for d in Dir::ALL {
             let (nx, ny) = neighbor(x, y, d);
             if !self.in_bounds(nx, ny) {
@@ -295,7 +309,7 @@ impl World {
                 1 => n >> STATE_BITS,
                 _ => return false, // behind
             };
-            seen[d as usize] = Seen::Cell(State::decode(bits & STATE_MASK));
+            seen[d as usize] = State::decode(bits & STATE_MASK);
         }
         let me = State::decode(word & STATE_MASK);
         let i = self.index(x, y);
