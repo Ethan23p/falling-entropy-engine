@@ -19,7 +19,7 @@
 //!       .
 //! ```
 
-use crate::{Dir, Material, State, World};
+use crate::{Dir, Material, Rules, State, World};
 
 /// The character a material draws as.
 pub fn glyph(material: Material) -> char {
@@ -53,7 +53,7 @@ impl World {
     /// Rebuilds a world from raw cell words, e.g. a GPU readback.
     pub fn from_words(width: i32, height: i32, words: Vec<u32>) -> World {
         assert_eq!(words.len(), (width * height) as usize, "{width}x{height} lattice");
-        World { width, height, cells: words }
+        World { width, height, cells: words, rules: Rules::default() }
     }
 
     /// Materials only.
@@ -134,6 +134,7 @@ mod tests {
     #[test]
     fn debug_intents_show_motion_on_both_ends() {
         let mut w = World::new(3, 3);
+        w.rules.start = [1 << 16; 4]; // falls at once
         w.paint(1, 0, Material::Sand);
         w.step(); // offer
         w.step(); // accept

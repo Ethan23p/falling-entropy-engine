@@ -151,7 +151,7 @@ pub fn pile_angle(world: &World) -> Option<f64> {
 /// A condition to capture a frame at: the first phase it holds.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Trigger {
-    /// Nothing has moved for a second's worth of phases (60).
+    /// Nothing has moved for a second's worth of phases.
     Settled,
     /// Water's resting surface has been level (`level` at most 2) for a second's worth of phases.
     Level,
@@ -191,8 +191,8 @@ impl Trigger {
 
     pub fn holds(&self, m: &Metrics) -> bool {
         match self {
-            Trigger::Settled => m.still >= 60,
-            Trigger::Level => m.level_for >= 60,
+            Trigger::Settled => m.still >= crate::RATE,
+            Trigger::Level => m.level_for >= crate::RATE,
             Trigger::Compare { metric, op, value } => m.get(metric).is_some_and(|v| match op {
                 Op::Less => v < *value,
                 Op::LessEq => v <= *value,
@@ -232,7 +232,7 @@ mod tests {
         run.step();
         assert!(run.metrics().moving > 0);
         let mut empty = Run::new(find("empty").unwrap(), 10, 10);
-        for _ in 0..70 {
+        for _ in 0..crate::RATE + 10 {
             empty.step();
         }
         assert!(Trigger::Settled.holds(&empty.metrics()));

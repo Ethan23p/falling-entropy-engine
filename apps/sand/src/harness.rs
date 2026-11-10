@@ -135,6 +135,7 @@ fn strip(args: &[String]) -> Result<(), String> {
 
     for &scene in &a.scenes {
         let mut run = Run::new(scene, a.size.0, a.size.1);
+        run.world.rules = tuner.current.rules();
         let mut times: Vec<(u32, f32)> = a.at.iter().map(|&t| ((t * rate).round() as u32, t)).collect();
         times.sort_by_key(|&(p, _)| p);
         let default_end = if a.when.is_empty() { 0.0 } else { 30.0 };
@@ -405,7 +406,7 @@ impl Font {
 
 // The feel benchmark
 
-/// One measurement of feel: a scene run on a fixed lattice at 60 phases/s.
+/// One measurement of feel: a scene run on a fixed lattice at the shipped sim rate and rules.
 struct Case {
     name: &'static str,
     unit: &'static str,
@@ -413,7 +414,11 @@ struct Case {
 }
 
 const SIZE: (i32, i32) = (120, 80);
-const RATE: f64 = 60.0;
+
+/// The shipped sim rate, in phases per second.
+fn rate() -> f64 {
+    Config::default().sim_rate as f64
+}
 
 fn run_of(name: &str) -> Run {
     Run::new(scenes::find(name).expect("bench scene"), SIZE.0, SIZE.1)
@@ -422,11 +427,11 @@ fn run_of(name: &str) -> Run {
 /// Steps `run` until `done` holds or `seconds` pass; returns the seconds taken, if it held.
 fn seconds_until(run: &mut Run, seconds: f64, done: impl Fn(&Run) -> bool) -> Option<f64> {
     let start = run.phase;
-    let end = start + (seconds * RATE) as u32;
+    let end = start + (seconds * rate()) as u32;
     while run.phase < end {
         run.step();
         if done(run) {
-            return Some((run.phase - start) as f64 / RATE);
+            return Some((run.phase - start) as f64 / rate());
         }
     }
     None
@@ -444,11 +449,17 @@ const CASES: &[Case] = &[
         },
     },
     Case {
+        // Restless drops skating on the surface keep water moving; spent speed lets it rest.
+        name: "dam: settles",
+        unit: "s",
+        measure: || seconds_until(&mut run_of("dam"), 60.0, |r| r.metrics().still >= scenes::RATE),
+    },
+    Case {
         name: "pour: pile angle",
         unit: "°",
         measure: || {
             let mut run = run_of("pour");
-            seconds_until(&mut run, 40.0, |r| r.phase > 1200 && r.metrics().still >= 60)?;
+            seconds_until(&mut run, 40.0, |r| r.phase > 20 * scenes::RATE && r.metrics().still >= scenes::RATE)?;
             pile_angle(&run.world)
         },
     },
@@ -458,7 +469,7 @@ const CASES: &[Case] = &[
         measure: || {
             let mut run = run_of("pour");
             seconds_until(&mut run, 20.0, |_| false);
-            seconds_until(&mut run, 60.0, |r| r.metrics().still >= 60)
+            seconds_until(&mut run, 60.0, |r| r.metrics().still >= scenes::RATE)
         },
     },
     Case {
@@ -508,7 +519,7 @@ fn bench() -> Result<(), String> {
             Some((k.to_string(), v.parse().ok()))
         })
         .collect();
-    println!("feel, on the CPU reference at {}x{} cells and {RATE} phases/s:\n", SIZE.0, SIZE.1);
+    println!("feel, on the CPU reference at {}x{} cells and {} phases/s:\n", SIZE.0, SIZE.1, rate());
     println!("  {:<34} {:>10} {:>10} {:>10}", "", "now", "last", "change");
     let mut saved = String::new();
     for case in CASES {

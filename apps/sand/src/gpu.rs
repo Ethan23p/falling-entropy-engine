@@ -111,7 +111,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 16);
+        let params = uniform("params", 48);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -149,9 +149,24 @@ impl Lattice {
         encoder: &mut wgpu::CommandEncoder,
         stamps: &[Stamp],
         phases: u32,
+        rules: &sim::Rules,
     ) {
         let stamps = &stamps[stamps.len().saturating_sub(MAX_STAMPS)..];
-        let params = [self.width as u32, self.height as u32, stamps.len() as u32, 0];
+        let [s0, s1, s2, s3] = rules.start;
+        let params = [
+            self.width as u32,
+            self.height as u32,
+            stamps.len() as u32,
+            rules.splash as u32,
+            s0,
+            s1,
+            s2,
+            s3,
+            rules.gravity,
+            rules.friction,
+            0,
+            0,
+        ];
         queue.write_buffer(&self.params, 0, &words(&params));
         let (gx, gy) = self.groups();
         if !stamps.is_empty() {
@@ -331,7 +346,7 @@ mod tests {
         let mut phase = 0;
         for chunk in [1, 1, 1, 7, 40, 150] {
             let mut encoder = device.create_command_encoder(&Default::default());
-            lattice.simulate(&queue, &pipelines, &mut encoder, &[], chunk);
+            lattice.simulate(&queue, &pipelines, &mut encoder, &[], chunk, &world.rules);
             encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4) as u64);
             queue.submit([encoder.finish()]);
             for _ in 0..chunk {
@@ -372,7 +387,7 @@ mod tests {
             world.step();
         }
         let mut encoder = device.create_command_encoder(&Default::default());
-        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30);
+        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30, &world.rules);
         encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4) as u64);
         queue.submit([encoder.finish()]);
         let slice = readback.slice(..);

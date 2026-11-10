@@ -1,19 +1,25 @@
 // The sim on the GPU: a line-for-line mirror of crates/sim (`next`, `World::update`,
 // `World::paint`). Keep the two identical; the GPU parity test checks them bit for bit.
 //
-// A cell's word: state (bits 0-8), kept-back value (bits 9-17), phase (bits 18-31).
+// A cell's word: state (bits 0-10), kept-back value (bits 11-21), phase (bits 22-31).
 // A state: material (bits 0-2: 0 air, 1 sand, 2 water, 3 slate, 4 bedrock), then one intent
 // (bits 3-5), stored as 1 + a direction's index, 0 meaning none; then the flow (bit 6, set for
 // right: water's, or the packet's for sand carrying one); then water's waited or sand's carries
-// (bit 7); then whether the intent is an acceptance (bit 8).
+// (bit 7); then whether the intent is an acceptance (bit 8); then sand's or water's speed (bits 9-10).
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
+// `Rules` in crates/sim: chances out of 65,536, worked out on the CPU.
 struct Params {
     width: i32,
     height: i32,
     stamps: u32,
-    _pad: u32,
+    splash: u32,
+    start: vec4<u32>,
+    gravity: u32,
+    friction: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 // A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
@@ -29,10 +35,10 @@ struct Stamp {
 @group(0) @binding(1) var<storage, read_write> cells: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read> stamps: array<Stamp>;
 
-const STATE_BITS: u32 = 9u;
-const STATE_MASK: u32 = 511u;
-const PHASE_SHIFT: u32 = 18u;
-const PHASE_MASK: u32 = 0x3fffu;
+const STATE_BITS: u32 = 11u;
+const STATE_MASK: u32 = 2047u;
+const PHASE_SHIFT: u32 = 22u;
+const PHASE_MASK: u32 = 0x3ffu;
 const AIR: u32 = 0u;
 const SAND: u32 = 1u;
 const WATER: u32 = 2u;
@@ -44,6 +50,11 @@ const ACCEPTING: u32 = 256u;
 const SALT_OFFER: u32 = 1u;
 const SALT_ACCEPT: u32 = 2u;
 const SALT_FLOW: u32 = 3u;
+const SALT_START: u32 = 4u;
+const SALT_EARN: u32 = 5u;
+const SALT_FRICTION: u32 = 6u;
+const TOP_SPEED: u32 = 3u;
+const DOWN: u32 = 3u;
 
 fn mix(v0: u32) -> u32 {
     var v = v0;
@@ -56,6 +67,11 @@ fn mix(v0: u32) -> u32 {
 
 fn hash(x: i32, y: i32, phase: u32, salt: u32) -> u32 {
     return mix(u32(x) ^ mix(u32(y) ^ mix(phase ^ mix(salt))));
+}
+
+// `within`: random `bits` fall within `chance`, out of 65,536.
+fn within(bits: u32, chance: u32) -> bool {
+    return (bits & 0xffffu) < chance;
 }
 
 fn neighbor(x: i32, y: i32, d: u32) -> vec2<i32> {
@@ -108,6 +124,16 @@ fn carries(s: u32) -> u32 {
 // `State::sends`: the matter an offer from this cell sends.
 fn sends(s: u32) -> u32 {
     return select(material_of(s), WATER, carries(s) == 1u);
+}
+
+// `State::speed`: sand's or water's, 0 to TOP_SPEED.
+fn speed_of(s: u32) -> u32 {
+    return select(0u, (s >> 9u) & 3u, moves(material_of(s)));
+}
+
+// A neighbor toward `d` I could follow: matter below me, itself falling straight down.
+fn follows(n: u32, d: u32) -> bool {
+    return d == DOWN && moves(material_of(n)) && carries(n) == 0u && offer_of(n) == DOWN + 1u;
 }
 
 // `density` in crates/sim: air 0, water 1, sand 2; slate and bedrock never move (9).
@@ -194,6 +220,7 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
     var flow = (me >> 6u) & 1u;
     var waited = (me >> 7u) & 1u;
     var carry = carries(me);
+    var speed = speed_of(me);
 
     // Transfer, the giving half: my offer was accepted, so I hand over what I sent.
     if offer != 0u {
@@ -205,7 +232,12 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
                 new_offer = 0u;
                 flow = 0u;
                 carry = 0u;
+                speed = 0u;
             } else if material_of(n) == AIR {
+                // Follow: matter above offering into me takes the gap, so a column falls together.
+                if d == DOWN && follows((*seen)[0], DOWN) {
+                    return AIR | (1u << 3u) | ACCEPTING;
+                }
                 return AIR;
             } else {
                 // Displacement: hold air already accepting what comes back, so nothing else falls in.
@@ -227,15 +259,31 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
                 flow = select(0u, select(side, (n >> 6u) & 1u, side == 2u), sent == WATER);
                 material = sent;
                 waited = 0u;
+                // Speed travels with the matter, plus what a fall earned; a packet arrives still.
+                if carries(n) == 1u {
+                    speed = 0u;
+                } else if fall(x, y, d) < 0 {
+                    let chance = select(params.gravity / 2u, params.gravity, d == 0u);
+                    let earned = select(0u, 1u, within(hash(x, y, phase, SALT_EARN), chance));
+                    speed = min(speed_of(n) + earned, TOP_SPEED);
+                } else {
+                    speed = speed_of(n);
+                }
             } else {
                 // Displacement: take the heavier matter, and carry what I held back the way it came.
                 material = sent;
                 carry = 1u;
                 new_offer = accept;
                 waited = 0u;
+                speed = 0u;
             }
         }
     }
+
+    // Start: a free fall straight down into air goes on a chance that grows with the speed.
+    // Slides, follows and sinking don't wait.
+    let falls_free = within(hash(x, y, phase, SALT_START), params.start[min(speed, TOP_SPEED)])
+        || material_of((*seen)[DOWN]) != AIR;
 
     if material == AIR {
         if accept == 0u {
@@ -263,28 +311,36 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
     if material == SAND && carry == 1u {
         // My packet is offered back to the gap I came from, which already accepts it and which the
         // brush leaves alone, so it always goes next phase.
-        return SAND | (new_offer << 3u) | (flow << 6u) | CARRIES;
+        return SAND | (new_offer << 3u) | (flow << 6u) | CARRIES | (speed << 9u);
     }
     if material == SAND {
-        if new_offer != 0u && !standing(SAND, (*seen)[new_offer - 1u], new_offer - 1u) {
-            new_offer = 0u;
+        if new_offer != 0u {
+            let d = new_offer - 1u;
+            if !standing(SAND, (*seen)[d], d) && !follows((*seen)[d], d) {
+                new_offer = 0u;
+            }
         }
         if new_offer == 0u {
             var p = picker();
             for (var d = 0u; d < 6u; d++) {
-                if fall(x, y, d) > 0 && free(SAND, (*seen)[d]) {
+                if fall(x, y, d) > 0 && (free(SAND, (*seen)[d]) || follows((*seen)[d], d)) {
                     consider(&p, d, fall(x, y, d));
                 }
             }
-            new_offer = chosen(&p, hash(x, y, phase, SALT_OFFER));
+            let c = chosen(&p, hash(x, y, phase, SALT_OFFER));
+            if c == 0u {
+                speed = 0u; // landed: sand stops dead
+            } else if c - 1u != DOWN || falls_free {
+                new_offer = c;
+            }
         }
-        return SAND | (new_offer << 3u);
+        return SAND | (new_offer << 3u) | (speed << 9u);
     }
     if material == WATER {
         if new_offer != 0u {
             let d = new_offer - 1u;
             let n = (*seen)[d];
-            if !standing(WATER, n, d) {
+            if !standing(WATER, n, d) && !follows(n, d) {
                 new_offer = 0u;
             } else if fall(x, y, d) < 0 && accept_of(n) == 0u {
                 // A side offer unanswered a second time was declined: flip, and try the other side.
@@ -301,18 +357,32 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
             // Fall: straight down first, then the diagonal on the flow side.
             var p = picker();
             for (var d = 0u; d < 6u; d++) {
-                if fall(x, y, d) > 0 && free(WATER, (*seen)[d]) {
+                if fall(x, y, d) > 0 && (free(WATER, (*seen)[d]) || follows((*seen)[d], d)) {
                     consider(&p, d, 2 * fall(x, y, d) + select(0, 1, side_of(d) == flow));
                 }
             }
-            new_offer = chosen(&p, 0u);
-            if new_offer == 0u {
-                // Side step: the flow side first, else the other, which becomes the flow.
-                if free(WATER, (*seen)[up_of(flow)]) {
-                    new_offer = up_of(flow) + 1u;
-                } else if free(WATER, (*seen)[up_of(1u - flow)]) {
-                    flow = 1u - flow;
-                    new_offer = up_of(flow) + 1u;
+            let c = chosen(&p, 0u);
+            if c != 0u {
+                // About to fall, so not stepping aside.
+                if c - 1u != DOWN || falls_free {
+                    new_offer = c;
+                }
+            } else {
+                // Landed: keep at most the splash. Side step: the flow side first, else the other.
+                // Pushed, it is free; otherwise it needs speed, and costs a level on the friction chance.
+                speed = min(speed, params.splash);
+                var side = 2u;
+                if free(WATER, (*seen)[up_of(flow)]) && (speed > 0u || pushed(seen, flow)) {
+                    side = flow;
+                } else if free(WATER, (*seen)[up_of(1u - flow)]) && (speed > 0u || pushed(seen, 1u - flow)) {
+                    side = 1u - flow;
+                }
+                if side != 2u {
+                    flow = side;
+                    new_offer = up_of(side) + 1u;
+                    if !pushed(seen, side) && within(hash(x, y, phase, SALT_FRICTION), params.friction) {
+                        speed -= 1u;
+                    }
                 }
             }
         }
@@ -334,9 +404,21 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
             }
         }
         let intent = select(new_offer, new_accept, new_accept != 0u);
-        return WATER | (intent << 3u) | (flow << 6u) | (waited << 7u) | select(0u, ACCEPTING, new_accept != 0u);
+        return WATER | (intent << 3u) | (flow << 6u) | (waited << 7u) | select(0u, ACCEPTING, new_accept != 0u)
+            | (speed << 9u);
     }
     return material; // slate and bedrock never change
+}
+
+// Water stepping to `side` is pushed by matter above it, or above it on the side it leaves, that
+// isn't moving into it (what it just took, as the snapshot still shows it).
+fn pushed(seen: ptr<function, array<u32, 6>>, side: u32) -> bool {
+    let back = up_of(1u - side);
+    return pushes((*seen)[0], 0u) || pushes((*seen)[back], back);
+}
+
+fn pushes(n: u32, d: u32) -> bool {
+    return moves(material_of(n)) && offer_of(n) != opposite(d) + 1u;
 }
 
 // One phase for one cell (`World::update`). Cells run in any order and in place: a neighbor

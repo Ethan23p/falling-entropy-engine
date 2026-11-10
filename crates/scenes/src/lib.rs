@@ -7,6 +7,9 @@
 
 pub mod run;
 
+/// The sim rate, in phases per second, that scripts and measures are written for: the shipped one.
+pub const RATE: u32 = 240;
+
 use sim::{Dir, Material, World};
 
 /// One brush stamp, in cell units, as `World::stamp` takes it.
@@ -116,9 +119,9 @@ fn dam(world: &mut World) {
     }
 }
 
-/// A trickle of sand onto the middle of the floor, for 20 s at 60 phases/s.
+/// A trickle of sand onto the middle of the floor, 20 grains a second for 20 s.
 fn pour(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
-    if phase < 1200 && phase.is_multiple_of(3) {
+    if phase < 20 * RATE && phase.is_multiple_of(RATE / 20) {
         out.push(Stamp { x: w as f32 / 2.0, y: 1.0, radius: 0.8, material: Material::Sand });
     }
 }
@@ -133,9 +136,9 @@ fn tap(world: &mut World) {
     wall(world, (w - 1, h - 1), Dir::Up, |_, y| y > h / 2);
 }
 
-/// Water run onto the top of the ramp for 15 s.
+/// Water run onto the top of the ramp, 30 times a second for 15 s.
 fn tap_script(phase: u32, w: i32, h: i32, out: &mut Vec<Stamp>) {
-    if phase < 900 && phase.is_multiple_of(2) {
+    if phase < 15 * RATE && phase.is_multiple_of(RATE / 30) {
         out.push(Stamp { x: w as f32 / 12.0 + 2.0, y: h as f32 / 3.0 - 6.0, radius: 1.2, material: Material::Water });
     }
 }

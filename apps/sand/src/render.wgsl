@@ -44,6 +44,12 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if material == 0u && (state & 256u) != 0u && source >= 3u && source <= 5u {
         material = 2u;
     }
+    // Air accepting from straight above is already taken by the matter above, which arrives next
+    // phase: drawn as that matter, a falling column stays solid (and a lone grain in transit draws
+    // in both cells for that phase).
+    if material == 0u && (state & 256u) != 0u && source == 1u && y > 0 {
+        material = min(cells[(y - 1) * view.width + x] & 7u, 4u);
+    }
     var colors = array<vec3<f32>, 5>(AIR, SAND, WATER, SLATE, BEDROCK);
     return vec4(colors[material], 1.0);
 }
