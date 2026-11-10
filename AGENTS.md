@@ -45,7 +45,7 @@ Keep it low-key:
 
 - **Rules live in plain Rust first.** `crates/sim` is the CPU reference simulation: cell state, rules, the counter-based hash. It has no GPU or platform dependencies and is what `cargo test` exercises.
 - **GPU code mirrors the reference.** The WGSL compute shaders implement the same rules bit for bit. A few headless GPU tests, marked `#[ignore]` so normal runs skip them, check that the shaders match the reference.
-- **Every write is a self-write**, and results never depend on evaluation order. Randomness comes only from the hash of position, phase and salt; never from thread IDs or a sequential RNG inside the sim.
+- **Every write is a self-write** (the tab's Agency policy: effects on a neighbor travel only as intents it reads), and results never depend on evaluation order. Randomness comes only from the hash of position, phase and salt; never from thread IDs or a sequential RNG inside the sim.
 - **The shared engine** (window, frame loop, input, config panel) is the `engine` crate from contra-ethos-games, used as a git dependency pinned to a `rev`. To develop both repos together, create a gitignored `.cargo/config.toml`:
 
   ```toml
@@ -54,7 +54,7 @@ Keep it low-key:
   ```
 
   Commit engine changes in contra-ethos-games first, then bump the `rev` here.
-- **The config is the one source of truth for tunables**, through the engine's `Tunable` and config panel. Its `Default` is the shipped values.
+- **The config is the one source of truth for tunables**, through the engine's `Tunable` and config panel. Its `Default` is the shipped values. Expose anything with a feel worth tweaking: Ethan tunes there, often from his phone, and sends values back with Copy values.
 
 ## Commands
 
