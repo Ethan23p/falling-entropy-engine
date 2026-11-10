@@ -35,6 +35,8 @@ Each version targets one mechanic, the next on the Focus list:
 4. Make it playable on desktop and phone, even before it's fun. Ethan plays on a phone.
 5. Commit, with the version prefix.
 
+Adversarial review comes in batches, not every version: a subagent tries to break everything changed since the `reviewed` git tag (conservation, order independence, stuck states, encoding). Run it before each push or deploy, after at most three versions, and right away when a version changes the foundations. Then move the tag: `git tag -f reviewed`.
+
 Keep it low-key:
 - Tests must stay fast. Compile times must stay low: few dependencies, and the sim crate has none.
 - The foundations (synchrony, the handshake, rendering) get the most care; everything builds on them.
