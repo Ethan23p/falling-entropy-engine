@@ -66,6 +66,7 @@ pub const ALL: &[Scene] = &[
         build: Build::Code(tap),
         script: Some(tap_script),
     },
+    Scene { name: "sink", about: "sand poured into a pool", build: Build::Code(sink), script: Some(sink_script) },
 ];
 
 pub fn find(name: &str) -> Option<&'static Scene> {
@@ -139,6 +140,21 @@ fn tap_script(phase: u32, w: i32, h: i32, out: &mut Vec<Stamp>) {
     }
 }
 
+/// A pool filling the bottom half.
+fn sink(world: &mut World) {
+    let (w, h) = (world.width(), world.height());
+    for y in h / 2..h {
+        for x in 0..w {
+            world.paint(x, y, Material::Water);
+        }
+    }
+}
+
+/// A trickle of sand into the middle of the pool, for 20 s.
+fn sink_script(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
+    pour(phase, w, 0, out);
+}
+
 /// A world's materials as text, so a scene painted in the game can be pasted back as a preset.
 ///
 /// ```text
@@ -166,7 +182,7 @@ impl Painting {
     pub fn of(world: &World, about: &str) -> Painting {
         let (width, height) = (world.width(), world.height());
         let cells =
-            (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| world.material(x, y)).collect();
+            (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| world.landed(x, y)).collect();
         Painting { width, height, about: about.trim().into(), cells }
     }
 
@@ -279,6 +295,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn painting_keeps_water_in_flight() {
+        // Mid-displacement, some water is a packet inside a grain's cell: the painting draws it
+        // in the gap it is about to fill, so no water is lost.
+        let mut run = run::Run::new(find("sink").unwrap(), 40, 30);
+        let mut saw_packet = false;
+        for _ in 0..300 {
+            run.step();
+            let w = &run.world;
+            saw_packet |= (0..w.height()).any(|y| (0..w.width()).any(|x| w.cell(x, y).carries));
+            let painted = Painting::of(w, "");
+            let water = (0..w.height())
+                .flat_map(|y| (0..w.width()).map(move |x| (x, y)))
+                .filter(|&(x, y)| painted.material(x, y) == Material::Water)
+                .count();
+            assert_eq!(water, w.count(Material::Water));
+        }
+        assert!(saw_packet);
     }
 
     #[test]

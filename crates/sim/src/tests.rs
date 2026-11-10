@@ -367,13 +367,15 @@ fn brush_erasing_a_grain_mid_handshake_creates_nothing() {
 
 #[test]
 fn encoding_state_round_trips() {
-    // A cell holds at most one intent: sand and water may offer, air may accept, slate does neither.
-    // Only water carries a flow.
+    // A cell holds at most one intent: sand and water may offer, air and water may accept, slate does
+    // neither. Water has a flow; sand carrying a packet holds the packet's flow.
     let mut states = vec![State::holding(Material::Slate), State::holding(Material::Bedrock)];
     for d in [None, Some(Dir::Down), Some(Dir::UpLeft)] {
         states.push(State { material: Material::Sand, offer: d, ..State::AIR });
         states.push(State { accept: d, ..State::AIR });
         for flow in [Side::Left, Side::Right] {
+            states.push(State { material: Material::Sand, offer: d, carries: true, flow, ..State::AIR });
+            states.push(State { material: Material::Water, accept: d, flow, ..State::AIR });
             for waited in [false, true] {
                 states.push(State { material: Material::Water, offer: d, flow, waited, ..State::AIR });
             }
@@ -385,8 +387,8 @@ fn encoding_state_round_trips() {
 }
 
 #[test]
-fn encoding_phase_has_16_bits() {
-    assert_eq!(PHASE_MASK, (1 << 16) - 1);
+fn encoding_state_has_9_bits_and_phase_14() {
+    assert!(STATE_MASK.count_ones() == 9 && PHASE_MASK == (1 << 14) - 1);
 }
 
 // Slate
@@ -734,20 +736,220 @@ fn water_level_surface_is_still() {
     }
 }
 
-#[test]
-fn water_holds_sand_up() {
-    let mut w = World::new(8, 8);
-    for x in 0..8 {
-        for y in 6..8 {
-            w.paint(x, y, Material::Water);
+// Displacement
+
+/// A pool: water filling the bottom `depth` rows.
+fn pool(w: i32, h: i32, depth: i32) -> World {
+    let mut world = World::new(w, h);
+    for y in h - depth..h {
+        for x in 0..w {
+            world.paint(x, y, Material::Water);
         }
     }
-    w.paint(4, 2, Material::Sand);
-    for _ in 0..100 {
+    world
+}
+
+#[test]
+fn displace_sand_offers_down_into_still_water() {
+    let around = seen(&[(Dir::Down, water(Side::Left))]);
+    assert_eq!(next(State::holding(Material::Sand), around, 2, 2, 0).offer, Some(Dir::Down));
+}
+
+#[test]
+fn displace_sand_never_offers_to_moving_water() {
+    let around = seen(&[
+        (Dir::Down, water_offering(Dir::DownLeft, Side::Left)),
+        (Dir::DownLeft, SLATE),
+        (Dir::DownRight, SLATE),
+    ]);
+    assert_eq!(next(State::holding(Material::Sand), around, 2, 2, 0).offer, None);
+}
+
+#[test]
+fn displace_still_water_accepts_sand_from_above() {
+    // Shut in but for the sand above: the water can't move, so it takes the grain's offer.
+    let around = blocked_below(&[(Dir::Up, offering(Dir::Down)), (Dir::UpLeft, SLATE), (Dir::UpRight, SLATE)]);
+    let s = next(water(Side::Right), around, 2, 2, 0);
+    assert_eq!((s.accept, s.offer), (Some(Dir::Up), None));
+}
+
+#[test]
+fn displace_water_that_can_move_does_not_accept() {
+    let s = next(water(Side::Left), seen(&[(Dir::Up, offering(Dir::Down))]), 2, 2, 0);
+    assert_eq!((s.accept, s.offer), (None, Some(Dir::Down)));
+}
+
+#[test]
+fn displace_water_never_accepts_water() {
+    let around = blocked_below(&[(Dir::Up, water_offering(Dir::Down, Side::Left))]);
+    assert_eq!(next(water(Side::Left), around, 2, 2, 0).accept, None);
+}
+
+#[test]
+fn displace_is_two_transfers_over_successive_phases() {
+    // A grain on a level pool one row deep: it offers, the water accepts, the grain moves in and
+    // the water it displaced waits in the grain's cell as a packet, which goes up the next phase.
+    let mut w = pool(5, 5, 1);
+    w.paint(2, 3, Material::Sand);
+    w.step(); // offer
+    assert_eq!(w.cell(2, 3).offer, Some(Dir::Down), "{}", w.ascii_intents());
+    w.step(); // accept
+    assert_eq!(w.cell(2, 4).accept, Some(Dir::Up), "{}", w.ascii_intents());
+    w.step(); // the grain moves down
+    let (gap, below) = (w.cell(2, 3), w.cell(2, 4));
+    assert_eq!((gap.material, gap.accept), (Material::Air, Some(Dir::Down)), "the gap waits for the water");
+    assert_eq!((below.material, below.carries, below.offer), (Material::Sand, true, Some(Dir::Up)));
+    assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (1, 5), "the packet counts as water");
+    w.step(); // the water moves up
+    assert_eq!(w.material(2, 3), Material::Water, "{}", w.ascii_intents());
+    assert_eq!((w.material(2, 4), w.cell(2, 4).carries), (Material::Sand, false));
+    assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (1, 5));
+}
+
+#[test]
+fn displace_sand_sinks_to_the_floor_of_a_pool() {
+    let mut w = pool(9, 14, 10);
+    w.paint(4, 1, Material::Sand);
+    for _ in 0..200 {
         w.step();
+        assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (1, 90));
     }
-    let [(x, y)] = sand_at(&w)[..] else { panic!("one grain") };
-    assert!(y <= 5 && w.material(x, y + 1) == Material::Water, "sand rests on the water at ({x},{y})");
+    let [(_, y)] = sand_at(&w)[..] else { panic!("one grain") };
+    assert_eq!(y, 13, "{}", w.ascii());
+}
+
+#[test]
+fn displace_sand_sinks_slower_than_it_falls() {
+    let reach_floor = |mut w: World| {
+        (1..).find(|_| {
+            w.step();
+            sand_at(&w).first().is_some_and(|&(_, y)| y == 19)
+        })
+    };
+    let (mut dry, wet) = (World::new(5, 20), pool(5, 20, 18));
+    dry.paint(2, 1, Material::Sand);
+    let mut wet = wet;
+    wet.paint(2, 1, Material::Sand);
+    let (dry, wet) = (reach_floor(dry).unwrap(), reach_floor(wet).unwrap());
+    assert!(wet > dry + 10, "dry {dry}, wet {wet}");
+}
+
+#[test]
+fn displace_sand_piles_under_water() {
+    let mut w = pool(20, 20, 12);
+    for y in 1..6 {
+        for x in 8..12 {
+            w.paint(x, y, Material::Sand);
+        }
+    }
+    let counts = (w.count(Material::Sand), w.count(Material::Water));
+    for _ in 0..1500 {
+        w.step();
+        assert_eq!((w.count(Material::Sand), w.count(Material::Water)), counts);
+    }
+    // Settled: no grain has a lighter neighbor downhill, and no packet is left in flight.
+    for (x, y) in sand_at(&w) {
+        assert!(!w.cell(x, y).carries, "a packet left at ({x},{y})\n{}", w.ascii());
+        for d in [Dir::Down, Dir::DownLeft, Dir::DownRight] {
+            let (nx, ny) = neighbor(x, y, d);
+            if w.in_bounds(nx, ny) {
+                assert!(
+                    !matches!(w.material(nx, ny), Material::Air | Material::Water),
+                    "grain at ({x},{y}) could still sink {d:?}\n{}",
+                    w.ascii()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn displace_water_never_sinks_into_sand() {
+    let mut w = World::new(10, 10);
+    for y in 6..10 {
+        for x in 0..10 {
+            w.paint(x, y, Material::Sand);
+        }
+    }
+    for x in 0..10 {
+        w.paint(x, 5, Material::Water);
+    }
+    let sand = sand_at(&w);
+    for _ in 0..200 {
+        w.step();
+        assert_eq!(sand_at(&w), sand);
+    }
+}
+
+#[test]
+fn displace_brush_leaves_the_gap_alone() {
+    // A grain sinking through deep water: its gap has no air around it, so if the brush could fill
+    // it, the packet would have nowhere to go and the grain would hang mid-pool.
+    for m in [Material::Water, Material::Sand, Material::Slate, Material::Air] {
+        let mut w = World::new(5, 6);
+        for y in 1..6 {
+            for x in 0..5 {
+                w.paint(x, y, Material::Water);
+            }
+        }
+        w.paint(2, 0, Material::Sand);
+        for _ in 0..6 {
+            w.step();
+        }
+        assert_eq!((w.material(2, 1), w.cell(2, 1).accept), (Material::Air, Some(Dir::Down)), "{m:?}");
+        w.paint(2, 1, m);
+        assert_eq!(w.material(2, 1), Material::Air, "{m:?}: the brush leaves the gap alone");
+        for _ in 0..100 {
+            w.step();
+            assert_eq!(w.count(Material::Water), 25);
+        }
+        let [(x, y)] = sand_at(&w)[..] else { panic!("one grain") };
+        assert!(y == 5 && !w.cell(x, y).carries, "{m:?}: the grain reaches the floor\n{}", w.ascii_intents());
+    }
+}
+
+#[test]
+fn displace_settles_under_a_busy_brush() {
+    for m in [Material::Water, Material::Sand, Material::Slate, Material::Air] {
+        let mut w = pool(20, 24, 18);
+        for y in 1..5 {
+            for x in 7..13 {
+                w.paint(x, y, Material::Sand);
+            }
+        }
+        for phase in 0..3000 {
+            if (40..200).contains(&phase) && phase % 3 == 0 {
+                w.stamp(10.0, 12.0, 8.0, m);
+            }
+            w.step();
+        }
+        for (x, y) in sand_at(&w) {
+            assert!(!w.cell(x, y).carries, "{m:?}: a packet stranded at ({x},{y})\n{}", w.ascii());
+        }
+    }
+}
+
+#[test]
+fn synchrony_displacement_is_independent_of_evaluation_order() {
+    let mut a = pool(20, 20, 10);
+    for y in 0..9 {
+        for x in 0..20 {
+            if hash(x, y, 0, 9).is_multiple_of(2) {
+                a.paint(x, y, Material::Sand);
+            }
+        }
+    }
+    let mut b = a.clone();
+    let cells: Vec<_> = (0..20).flat_map(|y| (0..20).map(move |x| (x, y))).collect();
+    for phase in 0..200 {
+        a.step();
+        let mut order = cells.clone();
+        order.sort_by_key(|&(x, y)| hash(x, y, phase, 10));
+        for (x, y) in order {
+            assert!(b.update(x, y));
+        }
+        assert_eq!(a, b, "phase {phase}");
+    }
 }
 
 #[test]

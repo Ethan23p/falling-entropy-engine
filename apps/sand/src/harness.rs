@@ -476,6 +476,25 @@ const CASES: &[Case] = &[
             (total > 0).then(|| 100.0 * basin as f64 / total as f64)
         },
     },
+    Case {
+        name: "sink: first grain reaches the floor",
+        unit: "s",
+        measure: || {
+            let mut run = run_of("sink");
+            let floor = SIZE.1 - 1;
+            seconds_until(&mut run, 30.0, |r| (0..SIZE.0).any(|x| r.world.material(x, floor) == Material::Sand))
+        },
+    },
+    Case {
+        // Drops skate on the raised surface for a long while, so the pile is measured at a time.
+        name: "sink: pile angle under water at 40 s",
+        unit: "°",
+        measure: || {
+            let mut run = run_of("sink");
+            seconds_until(&mut run, 40.0, |_| false);
+            pile_angle(&run.world)
+        },
+    },
 ];
 
 fn bench() -> Result<(), String> {

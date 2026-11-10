@@ -35,7 +35,15 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(BEDROCK, 1.0);
     }
-    let material = min(cells[y * view.width + x] & 7u, 4u);
+    let state = cells[y * view.width + x];
+    var material = min(state & 7u, 4u);
+    // Air accepting from below (bit 8, from down-right, down or down-left) can only be taking water
+    // that arrives next phase: a side step, or the water a sinking grain displaced. Drawing it as
+    // water already keeps a sinking grain's wake from flickering dark.
+    let source = (state >> 3u) & 7u;
+    if material == 0u && (state & 256u) != 0u && source >= 3u && source <= 5u {
+        material = 2u;
+    }
     var colors = array<vec3<f32>, 5>(AIR, SAND, WATER, SLATE, BEDROCK);
     return vec4(colors[material], 1.0);
 }

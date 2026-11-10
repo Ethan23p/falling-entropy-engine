@@ -5,7 +5,8 @@
 //! a line lower, so the column-offset hex lattice keeps its true geometry: a level water surface
 //! reads level, and a diagonal reads as a staircase of half steps.
 //!
-//! Glyphs: `.` air, `:` sand, `~` water, `#` slate, `@` bedrock. With intents
+//! Glyphs: `.` air, `:` sand, `~` water, `#` slate, `@` bedrock; sand carrying a packet of water
+//! draws `:` over `~`. With intents
 //! (`ascii_intents`), the top line of a brick shows the way matter is moving, `↑ ↗ ↘ ↓ ↙ ↖`,
 //! on both the giver (its offer) and the receiver (its acceptance).
 //!
@@ -57,12 +58,12 @@ impl World {
 
     /// Materials only.
     pub fn ascii(&self) -> String {
-        self.ascii_with(|s| (glyph(s.material), glyph(s.material)))
+        self.ascii_with(|s| (glyph(s.material), glyph(s.sends())))
     }
 
     /// Materials, with the way matter is moving on the top line of each brick that has an intent.
     pub fn ascii_intents(&self) -> String {
-        self.ascii_with(|s| (motion(s).map_or(glyph(s.material), arrow), glyph(s.material)))
+        self.ascii_with(|s| (motion(s).map_or(glyph(s.material), arrow), glyph(s.sends())))
     }
 
     /// Draws each cell's brick with `cell`'s two characters, top line first, under a ruler of
