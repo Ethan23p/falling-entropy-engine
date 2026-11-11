@@ -315,18 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn offer_a_dam_collapses_in_a_couple_of_seconds() {
-        // The face of a mass of water falls away diagonally, column after column, rather than
-        // waiting on straight falls into cells filling as it moves (see `open`, claimed).
-        let mut run = run::Run::new(find("dam").unwrap(), 80, 50);
-        while run.phase < 2 * RATE {
-            run.step();
-        }
-        let level = run.metrics().level;
-        assert!(level.is_some_and(|l| l <= 6), "dam not down after 2 s: level {level:?}\n{}", run.world.ascii());
-    }
-
-    #[test]
     fn painting_keeps_water_in_flight() {
         // Mid-trade, some water is a packet inside a grain's cell: the painting draws it
         // in the gap it is about to fill, so no water is lost.

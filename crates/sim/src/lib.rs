@@ -296,16 +296,12 @@ pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32, rules: &Rul
 
     // A neighbor `m` could offer to: one holding lighter matter that isn't falling (air, or water
     // still or stepping aside), or one below it falling straight down, which it takes the moment
-    // its own matter is gone (a follow). The cell below is claimed, not open, while a neighbor
-    // beside it is falling into it diagonally: it fills as I would move, so a mass falling
-    // together moves on diagonally rather than wait on a straight fall it can't make.
+    // its own matter is gone (a follow).
     let open = |m: Material, d: Dir| {
         let n = at(d);
         let still = n.offer.is_none_or(|e| matches!(e, Dir::UpLeft | Dir::UpRight));
         let follow = d == Dir::Down && moves(n.material) && !n.carries && n.offer == Some(Dir::Down);
-        let into = |side: Dir, e: Dir| moves(at(side).material) && at(side).offer == Some(e);
-        let claimed = d == Dir::Down && (into(Dir::DownLeft, Dir::DownRight) || into(Dir::DownRight, Dir::DownLeft));
-        (lighter(n.material, m) && still && !claimed) || follow
+        (lighter(n.material, m) && still) || follow
     };
 
     // Clear: a neighbor's acceptance names me, so what I offered is theirs. The packet, if I
@@ -421,15 +417,12 @@ pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32, rules: &Rul
                 // Matter moving into me (a record of what I just took) doesn't push.
                 let pushes = |d: Dir| moves(at(d).material) && at(d).offer != Some(d.opposite());
                 let pushed = |side: Side| pushes(Dir::Up) || pushes(side.flip().up());
-                // Turning around is never free: water pushed against a side that refused it spends
-                // its speed trying, then rests, rather than offering a futile step forever.
                 let speed = s.speed;
-                let free = |side: Side| side == flow && pushed(side);
-                let step = |side: &Side| open(Material::Water, side.up()) && (speed > 0 || free(*side));
+                let step = |side: &Side| open(Material::Water, side.up()) && (speed > 0 || pushed(*side));
                 if let Some(side) = [flow, flow.flip()].into_iter().find(step) {
                     s.offer = Some(side.up());
                     s.flow = side;
-                    if !free(side) && within(hash(x, y, phase, SALT_FRICTION), rules.friction) {
+                    if !pushed(side) && within(hash(x, y, phase, SALT_FRICTION), rules.friction) {
                         s.speed -= 1;
                     }
                 }

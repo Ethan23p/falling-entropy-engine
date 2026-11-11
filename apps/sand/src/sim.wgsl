@@ -188,12 +188,7 @@ fn open(m: u32, seen: ptr<function, array<u32, 6>>, d: u32) -> bool {
     let o = offer_of(n);
     let still = o == 0u || o == 2u || o == 6u;
     let follow = d == DOWN && moves(material_of(n)) && carries(n) == 0u && o == DOWN + 1u;
-    // Claimed: a neighbor beside the cell below is falling into it diagonally.
-    let left = (*seen)[4];
-    let right = (*seen)[2];
-    let claimed = d == DOWN
-        && ((moves(material_of(left)) && offer_of(left) == 3u) || (moves(material_of(right)) && offer_of(right) == 5u));
-    return (lighter(material_of(n), m) && still && !claimed) || follow;
+    return (lighter(material_of(n), m) && still) || follow;
 }
 
 // `pick` in crates/sim: the candidate with the highest key, equals chosen by `bits`.
@@ -371,21 +366,18 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
             speed = 0u;
         } else {
             // Landed: keep at most the splash. Side step: the flow side first, else the other.
-            // Pushed on the flow side, it is free; otherwise (turning around included) it needs
-            // speed, and costs a level on the friction chance.
+            // Pushed, it is free; otherwise it needs speed, and costs a level on the friction chance.
             speed = min(speed, params.splash);
-            let free = pushed(seen, flow);
             var side = 2u;
-            if open(WATER, seen, up_of(flow)) && (speed > 0u || free) {
+            if open(WATER, seen, up_of(flow)) && (speed > 0u || pushed(seen, flow)) {
                 side = flow;
-            } else if open(WATER, seen, up_of(1u - flow)) && speed > 0u {
+            } else if open(WATER, seen, up_of(1u - flow)) && (speed > 0u || pushed(seen, 1u - flow)) {
                 side = 1u - flow;
             }
             if side != 2u {
-                let paid = !(side == flow && free);
                 flow = side;
                 offer = up_of(side) + 1u;
-                if paid && within(hash(x, y, phase, SALT_FRICTION), params.friction) {
+                if !pushed(seen, side) && within(hash(x, y, phase, SALT_FRICTION), params.friction) {
                     speed -= 1u;
                 }
             }
