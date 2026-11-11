@@ -61,7 +61,7 @@ impl Run {
 }
 
 fn materials(world: &World) -> Vec<Material> {
-    (0..world.height()).flat_map(|y| (0..world.width()).map(move |x| world.material(x, y))).collect()
+    (0..world.height()).flat_map(|y| (0..world.width()).map(move |x| world.looks(x, y))).collect()
 }
 
 /// What a run looks like at one phase.
@@ -118,12 +118,12 @@ pub fn water_level(world: &World) -> Option<i32> {
         let mut top = None;
         let mut supported = true;
         for y in (0..h).rev() {
-            supported = match world.material(x, y) {
+            supported = match world.looks(x, y) {
                 Material::Air => false,
                 Material::Slate | Material::Bedrock => true,
                 Material::Sand | Material::Water => supported,
             };
-            if supported && world.material(x, y) == Material::Water {
+            if supported && world.looks(x, y) == Material::Water {
                 top = Some(height(x, y));
                 resting += 1;
             }
@@ -140,7 +140,7 @@ pub fn water_level(world: &World) -> Option<i32> {
 /// floor over the half-width of the pile's base, measured as drawn (cells one wide, one tall).
 pub fn pile_angle(world: &World) -> Option<f64> {
     let (w, h) = (world.width(), world.height());
-    let column = |x: i32| (0..h).find(|&y| world.material(x, y) == Material::Sand).map(|y| h - y);
+    let column = |x: i32| (0..h).find(|&y| world.looks(x, y) == Material::Sand).map(|y| h - y);
     let heights: Vec<(i32, i32)> = (0..w).filter_map(|x| column(x).map(|c| (x, c))).collect();
     let (&(first, _), &(last, _)) = (heights.first()?, heights.last()?);
     let peak = heights.iter().map(|&(_, c)| c).max()?;

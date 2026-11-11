@@ -482,7 +482,7 @@ const CASES: &[Case] = &[
             let total = w.count(Material::Water);
             let basin = (w.width() / 2..w.width())
                 .flat_map(|x| (0..w.height()).map(move |y| (x, y)))
-                .filter(|&(x, y)| w.material(x, y) == Material::Water)
+                .filter(|&(x, y)| w.looks(x, y) == Material::Water)
                 .count();
             (total > 0).then(|| 100.0 * basin as f64 / total as f64)
         },
@@ -493,7 +493,7 @@ const CASES: &[Case] = &[
         measure: || {
             let mut run = run_of("sink");
             let floor = SIZE.1 - 1;
-            seconds_until(&mut run, 30.0, |r| (0..SIZE.0).any(|x| r.world.material(x, floor) == Material::Sand))
+            seconds_until(&mut run, 30.0, |r| (0..SIZE.0).any(|x| r.world.looks(x, floor) == Material::Sand))
         },
     },
     Case {

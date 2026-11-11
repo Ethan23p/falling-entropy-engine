@@ -13,6 +13,25 @@ struct View {
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<storage, read> cells: array<u32>;
 
+// The index of cell i's current word, of the two it keeps: the one tagged with the later phase.
+fn current(i: i32) -> i32 {
+    let even = cells[2 * i] >> 16u;
+    let odd = cells[2 * i + 1] >> 16u;
+    return select(2 * i + 1, 2 * i, ((even - odd) & 0xffffu) == 1u);
+}
+
+fn neighbor(x: i32, y: i32, d: u32) -> vec2<i32> {
+    let odd = x & 1;
+    switch d {
+        case 0u: { return vec2(x, y - 1); }
+        case 1u: { return vec2(x + 1, y - 1 + odd); }
+        case 2u: { return vec2(x + 1, y + odd); }
+        case 3u: { return vec2(x, y + 1); }
+        case 4u: { return vec2(x - 1, y + odd); }
+        default: { return vec2(x - 1, y - 1 + odd); }
+    }
+}
+
 // Outside the lattice is bedrock, so it draws as bedrock.
 const BEDROCK: vec3<f32> = vec3(0.031, 0.035, 0.047);
 const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
@@ -35,20 +54,22 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(BEDROCK, 1.0);
     }
-    let state = cells[y * view.width + x];
+    // `World::looks`: a record (a giver whose matter a neighbor's acceptance just took) draws as
+    // what replaces it: air, or the water coming back to the cell a grain sank from.
+    let state = cells[current(y * view.width + x)] & 0xffffu;
     var material = min(state & 7u, 4u);
-    // Air accepting from below (bit 8, from down-right, down or down-left) can only be taking water
-    // that arrives next phase: a side step, or the water a sinking grain displaced. Drawing it as
-    // water already keeps a sinking grain's wake from flickering dark.
-    let source = (state >> 3u) & 7u;
-    if material == 0u && (state & 256u) != 0u && source >= 3u && source <= 5u {
-        material = 2u;
-    }
-    // Air accepting from straight above is already taken by the matter above, which arrives next
-    // phase: drawn as that matter, a falling column stays solid (and a lone grain in transit draws
-    // in both cells for that phase).
-    if material == 0u && (state & 256u) != 0u && source == 1u && y > 0 {
-        material = min(cells[(y - 1) * view.width + x] & 7u, 4u);
+    for (var d = 0u; d < 6u; d++) {
+        let n = neighbor(x, y, d);
+        if n.x < 0 || n.y < 0 || n.x >= view.width || n.y >= view.height {
+            continue;
+        }
+        let t = cells[current(n.y * view.width + n.x)] & 0xffffu;
+        let back = (d + 3u) % 6u + 1u;
+        if ((t >> 6u) & 7u) == back {
+            let carries = (state & 7u) == 1u && (state & 1024u) != 0u;
+            let packet = (t & 7u) == 1u && (t & 1024u) != 0u && ((t >> 3u) & 7u) == back;
+            material = select(select(0u, 2u, packet), 1u, carries);
+        }
     }
     var colors = array<vec3<f32>, 5>(AIR, SAND, WATER, SLATE, BEDROCK);
     return vec4(colors[material], 1.0);

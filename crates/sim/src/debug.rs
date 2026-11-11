@@ -6,9 +6,10 @@
 //! reads level, and a diagonal reads as a staircase of half steps.
 //!
 //! Glyphs: `.` air, `:` sand, `~` water, `#` slate, `@` bedrock; sand carrying a packet of water
-//! draws `:` over `~`. With intents
-//! (`ascii_intents`), the top line of a brick shows the way matter is moving, `↑ ↗ ↘ ↓ ↙ ↖`,
-//! on both the giver (its offer) and the receiver (its acceptance).
+//! draws `:` over `~`. Cells are drawn as they publish themselves, so a record (a giver whose
+//! matter was just taken) still shows the matter. With intents (`ascii_intents`), the top line of
+//! a brick shows the way matter is moving, `↑ ↗ ↘ ↓ ↙ ↖`: out along its offer, else in along its
+//! acceptance.
 //!
 //! ```text
 //!      012
@@ -44,7 +45,7 @@ pub fn arrow(d: Dir) -> char {
     }
 }
 
-/// The way matter is moving through a cell, if any: out along an offer, or in along an acceptance.
+/// The way matter is moving through a cell, if any: out along an offer, else in along an acceptance.
 pub fn motion(s: State) -> Option<Dir> {
     s.offer.or(s.accept.map(Dir::opposite))
 }
@@ -52,7 +53,7 @@ pub fn motion(s: State) -> Option<Dir> {
 impl World {
     /// Rebuilds a world from raw cell words, e.g. a GPU readback.
     pub fn from_words(width: i32, height: i32, words: Vec<u32>) -> World {
-        assert_eq!(words.len(), (width * height) as usize, "{width}x{height} lattice");
+        assert_eq!(words.len(), 2 * (width * height) as usize, "{width}x{height} lattice, two words a cell");
         World { width, height, cells: words, rules: Rules::default() }
     }
 
@@ -95,20 +96,26 @@ impl World {
 /// both worlds with intents, the differing cells marked `X` in a third view.
 pub fn diff(want: &World, got: &World) -> Option<String> {
     assert_eq!((want.width, want.height), (got.width, got.height), "same lattice size");
-    let first = want.cells.iter().zip(&got.cells).position(|(a, b)| a != b)?;
+    let differs: Vec<usize> = (0..(want.width * want.height) as usize)
+        .filter(|&i| want.cells[2 * i..2 * i + 2] != got.cells[2 * i..2 * i + 2])
+        .collect();
+    let first = *differs.first()?;
     let (x, y) = (first as i32 % want.width, first as i32 / want.width);
-    let differs = World::from_words(
-        want.width,
-        want.height,
-        want.cells.iter().zip(&got.cells).map(|(a, b)| u32::from(a != b)).collect(),
-    );
-    let marks = differs.ascii_with(|s| {
+    let mut marked = World::new(want.width, want.height);
+    for &i in &differs {
+        marked.set(i as i32 % want.width, i as i32 / want.width, State::holding(Material::Sand));
+    }
+    let marks = marked.ascii_with(|s| {
         let c = if s.material == Material::Sand { 'X' } else { '.' };
         (c, c)
     });
-    let count = differs.cells.iter().filter(|&&d| d != 0).count();
     Some(format!(
-        "{count} cells differ, first at ({x}, {y}): want {:?}, got {:?}\nwant:\n{}got:\n{}differ:\n{}",
+        "{} cells differ, first at ({x}, {y}): want {:?}, got {:?}
+want:
+{}got:
+{}differ:
+{}",
+        differs.len(),
         want.cell(x, y),
         got.cell(x, y),
         want.ascii_intents(),

@@ -240,7 +240,7 @@ impl Readback {
     pub fn new(device: &wgpu::Device, lattice: &Lattice) -> Self {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: (lattice.width * lattice.height * 4) as u64,
+            size: (lattice.width * lattice.height * 8) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -338,7 +338,7 @@ mod tests {
         let lattice = Lattice::new(&device, &pipelines, &world);
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: (w * h * 4) as u64,
+            size: (w * h * 8) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -347,7 +347,7 @@ mod tests {
         for chunk in [1, 1, 1, 7, 40, 150] {
             let mut encoder = device.create_command_encoder(&Default::default());
             lattice.simulate(&queue, &pipelines, &mut encoder, &[], chunk, &world.rules);
-            encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4) as u64);
+            encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 8) as u64);
             queue.submit([encoder.finish()]);
             for _ in 0..chunk {
                 world.step();
@@ -388,7 +388,7 @@ mod tests {
         }
         let mut encoder = device.create_command_encoder(&Default::default());
         lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30, &world.rules);
-        encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4) as u64);
+        encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 8) as u64);
         queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));

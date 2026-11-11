@@ -184,8 +184,7 @@ const MATERIALS: [Material; 5] = [Material::Air, Material::Sand, Material::Water
 impl Painting {
     pub fn of(world: &World, about: &str) -> Painting {
         let (width, height) = (world.width(), world.height());
-        let cells =
-            (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| world.landed(x, y)).collect();
+        let cells = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| world.looks(x, y)).collect();
         Painting { width, height, about: about.trim().into(), cells }
     }
 
@@ -301,8 +300,40 @@ mod tests {
     }
 
     #[test]
+    fn contract_every_scene_keeps_the_rules_with_its_brush() {
+        // Every unit of matter has exactly one owner and no offer is made without its matter, after
+        // every step of every scene, scripted brush and all.
+        for scene in ALL {
+            let mut run = run::Run::new(scene, 48, 36);
+            for _ in 0..400 {
+                run.step();
+                if let Err(e) = run.world.audit() {
+                    panic!("{}: {e}", scene.name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offer_a_dam_collapses_in_a_couple_of_seconds() {
+        // The face of a mass of water falls away diagonally, column after column, rather than
+        // waiting on straight falls into cells filling as it moves (see `open`, claimed).
+        let mut run = run::Run::new(find("dam").unwrap(), 80, 50);
+        while run.phase < 2 * RATE {
+            run.step();
+        }
+        let level = run.metrics().level;
+        assert!(
+            level.is_some_and(|l| l <= 6),
+            "dam not down after 2 s: level {level:?}
+{}",
+            run.world.ascii()
+        );
+    }
+
+    #[test]
     fn painting_keeps_water_in_flight() {
-        // Mid-displacement, some water is a packet inside a grain's cell: the painting draws it
+        // Mid-trade, some water is a packet inside a grain's cell: the painting draws it
         // in the gap it is about to fill, so no water is lost.
         let mut run = run::Run::new(find("sink").unwrap(), 40, 30);
         let mut saw_packet = false;

@@ -3,8 +3,9 @@
 //!
 //! Names follow the Primitives section of the Falling Sand Engine tab:
 //! a column-offset hexagonal lattice of cells, each holding sand, water, slate, bedrock or air,
-//! advanced by synchronizer-phasing, moving matter by a directed handshake
-//! (offer → accept → transfer) at reach 1 with self-writes only.
+//! advanced by synchronizer-phasing, moving matter by directed, conditional contracts at reach 1
+//! with self-writes only. An acceptance is receipt: the receiver writes itself holding the matter
+//! and names its giver, and the giver clears when it reads that.
 
 pub mod debug;
 #[cfg(test)]
@@ -123,9 +124,9 @@ fn within(bits: u32, chance: u32) -> bool {
 
 // Motion
 
-/// The fastest speed, the lattice's speed of light: a cell at it offers as soon as it is free, so it
-/// moves a cell every two phases, the handshake's own pace. Sand and water build up to it; a fast
-/// material could start there.
+/// The top speed. A cell at it offers as soon as it is free, so it falls a cell every phase: the
+/// lattice's speed of light, the pace at which a contract's news travels. Sand and water build up
+/// to it; a fast material could start there.
 pub const TOP_SPEED: u8 = 3;
 
 /// The feel of motion, tuned in the config panel. Chances are out of 65,536, worked out here once
@@ -180,20 +181,21 @@ pub enum Material {
     Bedrock = 4,
 }
 
-/// What a cell holds this phase.
+/// What a cell publishes this phase: what it holds, and its side of any contract.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
     pub material: Material,
-    /// The direction this cell is sending its matter to.
+    /// The neighbor this cell offers its matter to (its packet, if it carries one).
     pub offer: Option<Dir>,
-    /// The direction this cell is receiving matter from.
+    /// The neighbor this cell took matter from in this update: receipt, naming its giver.
     pub accept: Option<Dir>,
     /// Water only: the side it is spreading toward.
     pub flow: Side,
-    /// Water only: its side offer has already gone a phase unanswered.
+    /// Water only: it offered a side step last phase and is holding for the answer; if the
+    /// answer is no, it flips.
     pub waited: bool,
-    /// Sand only: it holds a packet of the water it displaced, for one phase, offered back to
-    /// the cell the sand came from. `flow` is the packet's.
+    /// Sand only: it holds a packet of the water it displaced, offered back to the cell the sand
+    /// came from. `flow` is the packet's.
     pub carries: bool,
     /// Sand and water: how fast it is moving, 0 to `TOP_SPEED`.
     pub speed: u8,
@@ -216,45 +218,51 @@ impl State {
         State { material, ..State::AIR }
     }
 
-    /// 11 bits: material (bits 0-2: 0 air, 1 sand, 2 water, 3 slate, 4 bedrock), then one intent
-    /// (bits 3-5), stored as 1 + a direction's index; then the flow (bit 6, set for right: water's
-    /// own, or the packet's for sand carrying one); then water's waited or sand's carries (bit 7);
-    /// then whether the intent is an acceptance (bit 8); then sand's or water's speed (bits 9-10).
-    /// A cell holds at most one intent: sand's offer, water's offer or acceptance, or air's
-    /// acceptance.
+    /// 13 bits: material (bits 0-2: 0 air, 1 sand, 2 water, 3 slate, 4 bedrock); the offer (bits
+    /// 3-5) and the acceptance (bits 6-8), each stored as 1 + a direction's index, 0 for none; the
+    /// flow (bit 9, set for right: water's own, or the packet's for sand carrying one); water's
+    /// waited or sand's carries (bit 10); sand's or water's speed (bits 11-12). Only sand and water
+    /// hold anything but a material, except air the brush just erased a receiver to, which keeps the
+    /// acceptance for a phase.
     pub fn encode(self) -> u32 {
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
-        let speed = (self.speed.min(TOP_SPEED) as u32) << 9;
-        let extra = match self.material {
-            Material::Water => (self.flow as u32) << 6 | (self.waited as u32) << 7 | speed,
-            Material::Sand if self.carries => (self.flow as u32) << 6 | 1 << 7 | speed,
-            Material::Sand => speed,
-            _ => 0,
+        match self.material {
+            Material::Air => return dir(self.accept) << 6,
+            Material::Slate | Material::Bedrock => return self.material as u32,
+            Material::Sand | Material::Water => {}
+        }
+        let (flow, flag) = match self.material {
+            Material::Water => (self.flow as u32, self.waited as u32),
+            _ if self.carries => (self.flow as u32, 1),
+            _ => (0, 0),
         };
-        let accepting = (self.accept.is_some() as u32) << 8;
-        self.material as u32 | dir(self.offer.or(self.accept)) << 3 | extra | accepting
+        self.material as u32
+            | dir(self.offer) << 3
+            | dir(self.accept) << 6
+            | flow << 9
+            | flag << 10
+            | (self.speed.min(TOP_SPEED) as u32) << 11
     }
 
     pub fn decode(bits: u32) -> State {
-        let v = bits >> 3 & 7;
-        let intent = (v != 0).then(|| Dir::ALL[(v - 1) as usize % 6]);
-        let (offer, accept) = if bits >> 8 & 1 == 1 { (None, intent) } else { (intent, None) };
-        let flow = if bits >> 6 & 1 == 1 { Side::Right } else { Side::Left };
-        let flag = bits >> 7 & 1 == 1;
-        let speed = (bits >> 9 & 3) as u8;
-        match bits & 7 {
-            0 => State { accept: intent, ..State::AIR },
-            1 => State {
-                material: Material::Sand,
-                offer,
-                carries: flag,
-                flow: if flag { flow } else { Side::Left },
-                speed,
-                ..State::AIR
-            },
-            2 => State { material: Material::Water, offer, accept, flow, waited: flag, speed, ..State::AIR },
-            3 => State::SLATE,
-            _ => State::BEDROCK,
+        let dir = |v: u32| (v != 0).then(|| Dir::ALL[(v - 1) as usize % 6]);
+        let material = match bits & 7 {
+            0 => return State { accept: dir(bits >> 6 & 7), ..State::AIR },
+            1 => Material::Sand,
+            2 => Material::Water,
+            3 => return State::SLATE,
+            _ => return State::BEDROCK,
+        };
+        let flag = bits >> 10 & 1 == 1;
+        let flow = if bits >> 9 & 1 == 1 { Side::Right } else { Side::Left };
+        State {
+            material,
+            offer: dir(bits >> 3 & 7),
+            accept: dir(bits >> 6 & 7),
+            flow: if material == Material::Water || flag { flow } else { Side::Left },
+            waited: material == Material::Water && flag,
+            carries: material == Material::Sand && flag,
+            speed: (bits >> 11 & 3) as u8,
         }
     }
 
@@ -262,83 +270,101 @@ impl State {
     pub fn sends(self) -> Material {
         if self.carries { Material::Water } else { self.material }
     }
+
+    /// The matter this cell took in its acceptance: sand, if it took sand into water and now
+    /// carries the water as a packet.
+    pub fn received(self) -> Material {
+        if self.carries { Material::Sand } else { self.material }
+    }
 }
 
 // The rule
 
 /// One cell's update: its next state from its own state and what it sees around it, all at
-/// the same phase (outside the lattice reads as bedrock). Every cell computes only itself, so
-/// the two halves of a transfer agree because they read the same snapshot.
+/// the same phase (outside the lattice reads as bedrock). Every cell computes only itself, and
+/// every party to a contract derives its own outcome from what has reached it:
+///
+/// - An offer stands while it is repeated. The phase after offering, a cell can't yet know the
+///   answer, so it may only repeat the offer or hold, and accepts nothing.
+/// - An acceptance is receipt: the receiver holds the matter from this update on and names its
+///   giver. It may offer the matter onward in the same update. It never takes the same giver two
+///   phases running, since the repeat of an offer it took is a record, not more matter.
+/// - The giver reads the acceptance naming it on its next update and clears: its copy was a
+///   record of a finished send.
 pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32, rules: &Rules) -> State {
     let at = |d: Dir| seen[d as usize];
-    let mut s = me;
-    // A neighbor I could follow: matter below me, itself falling straight down.
-    let follows = |d: Dir| {
+
+    // A neighbor `m` could offer to: one holding lighter matter that isn't falling (air, or water
+    // still or stepping aside), or one below it falling straight down, which it takes the moment
+    // its own matter is gone (a follow). The cell below is claimed, not open, while a neighbor
+    // beside it is falling into it diagonally: it fills as I would move, so a mass falling
+    // together moves on diagonally rather than wait on a straight fall it can't make.
+    let open = |m: Material, d: Dir| {
         let n = at(d);
-        d == Dir::Down && moves(n.material) && !n.carries && n.offer == Some(Dir::Down)
+        let still = n.offer.is_none_or(|e| matches!(e, Dir::UpLeft | Dir::UpRight));
+        let follow = d == Dir::Down && moves(n.material) && !n.carries && n.offer == Some(Dir::Down);
+        let into = |side: Dir, e: Dir| moves(at(side).material) && at(side).offer == Some(e);
+        let claimed = d == Dir::Down && (into(Dir::DownLeft, Dir::DownRight) || into(Dir::DownRight, Dir::DownLeft));
+        (lighter(n.material, m) && still && !claimed) || follow
     };
 
-    // Transfer, the giving half: my offer was accepted, so I hand over what I sent.
-    if let Some(d) = me.offer
-        && at(d).accept == Some(d.opposite())
-    {
-        if me.carries {
-            // The packet has gone; plain sand is left.
-            s = State::holding(Material::Sand);
-        } else if at(d).material == Material::Air {
-            // Follow: matter above offering into me takes the gap, so a column falls together.
-            let up = at(Dir::Up);
-            let follower = d == Dir::Down && moves(up.material) && !up.carries && up.offer == Some(Dir::Down);
-            return State { accept: follower.then_some(Dir::Up), ..State::AIR };
-        } else {
-            // Displacement: the receiver held lighter matter, which comes back to me next phase. I
-            // hold air already accepting it, so nothing else falls into the gap.
-            return State { accept: Some(d), ..State::AIR };
-        }
+    // Clear: a neighbor's acceptance names me, so what I offered is theirs. The packet, if I
+    // carried one, else everything I held.
+    let taken = Dir::ALL.into_iter().any(|d| at(d).accept == Some(d.opposite()));
+    let mut s = State { accept: None, ..me };
+    if taken {
+        s = if me.carries { State::holding(Material::Sand) } else { State::AIR };
+    } else if let Some(d) = me.offer {
+        // Pending: the answer to my last offer isn't in. A packet's gap always takes it, a fall
+        // stands while its target could still take it, and a side step is offered once. Holding
+        // withdraws the offer: next phase the answer is in and the matter is free.
+        let repeat = me.carries || (drop(x, y, d) > 0 && open(me.material, d));
+        s.offer = repeat.then_some(d);
+        s.waited = me.material == Material::Water && drop(x, y, d) < 0;
+        return s;
     }
 
-    // Transfer, the receiving half: the offer I accepted still stands, so I take what it sends.
-    // Water brings its flow, turned toward the side it moved to.
-    if let Some(d) = me.accept {
-        s.accept = None;
-        let n = at(d);
-        if n.offer == Some(d.opposite()) {
-            let sent = n.sends();
-            if me.material == Material::Air {
-                let flow = if sent == Material::Water { Side::of(d.opposite()).unwrap_or(n.flow) } else { Side::Left };
-                // Speed travels with the matter, plus what a fall earned: a level on the gravity
-                // chance, half that for a diagonal. A side step was paid for when offered. A packet
-                // arrives still.
-                let speed = if n.carries {
-                    0
-                } else if drop(x, y, d) < 0 {
-                    let chance = if d == Dir::Up { rules.gravity } else { rules.gravity / 2 };
-                    let earned = within(hash(x, y, phase, SALT_EARN), chance) as u8;
-                    (n.speed + earned).min(TOP_SPEED)
-                } else {
-                    n.speed
-                };
-                s = State { material: sent, flow, speed, ..State::AIR };
+    // Accept, into a cell holding nothing: a packet coming back first, then the steepest offer;
+    // ties are hashed. A side offer, from below, is taken only where I could pass the water on
+    // downhill, so water never climbs.
+    if s.material == Material::Air {
+        let passes_on = |from: Dir| {
+            let far = match from {
+                Dir::DownLeft => Dir::DownRight,
+                Dir::DownRight => Dir::DownLeft,
+                _ => return false,
+            };
+            at(Dir::Down).material == Material::Air || at(far).material == Material::Air
+        };
+        let offered = |d: Dir| {
+            let n = at(d);
+            moves(n.material) && n.offer == Some(d.opposite()) && me.accept != Some(d)
+        };
+        let packet = Dir::ALL.into_iter().find(|&d| offered(d) && at(d).carries);
+        let fall = || {
+            let offers = Dir::ALL.into_iter().filter(|&d| offered(d) && (drop(x, y, d) < 0 || passes_on(d)));
+            pick(offers, |d| -drop(x, y, d), hash(x, y, phase, SALT_ACCEPT))
+        };
+        if let Some(d) = packet.or_else(fall) {
+            let n = at(d);
+            // Speed travels with the matter, plus what a fall earned: a level on the gravity
+            // chance, half that for a diagonal. A side step was paid for when offered. A packet
+            // arrives still. Water brings its flow, turned toward the side it moved to.
+            let speed = if n.carries {
+                0
+            } else if drop(x, y, d) < 0 {
+                let chance = if d == Dir::Up { rules.gravity } else { rules.gravity / 2 };
+                let earned = within(hash(x, y, phase, SALT_EARN), chance) as u8;
+                (n.speed + earned).min(TOP_SPEED)
             } else {
-                // Displacement: I take the heavier matter and carry what I held as a packet, offered
-                // straight back to where the matter came from.
-                s = State { material: sent, carries: true, flow: me.flow, offer: Some(d), ..State::AIR };
-            }
+                n.speed
+            };
+            let flow = if n.carries { n.flow } else { Side::of(d.opposite()).unwrap_or(n.flow) };
+            let flow = if n.sends() == Material::Water { flow } else { Side::Left };
+            s = State { material: n.sends(), accept: Some(d), flow, speed, ..State::AIR };
         }
     }
 
-    // A neighbor `m` could offer to: it holds lighter matter (or air), isn't falling and hasn't
-    // accepted anything. Water stepping aside still counts: it takes heavier matter first.
-    let unmoved = |n: State| n.offer.is_none_or(|e| matches!(e, Dir::UpLeft | Dir::UpRight));
-    let free = |m: Material, d: Dir| {
-        let n = at(d);
-        lighter(n.material, m) && unmoved(n) && n.accept.is_none()
-    };
-    // An offer stands while its target still could take it and hasn't accepted someone else.
-    let standing = |m: Material, d: Dir| {
-        let n = at(d);
-        lighter(n.material, m) && unmoved(n) && (n.accept.is_none() || n.accept == Some(d.opposite()))
-    };
     // Start: a free fall straight down into air goes on a chance that grows with the speed, so
     // matter starts slow and builds up. Slides, follows and sinking don't wait.
     let start = |d: Dir, speed: u8| {
@@ -347,110 +373,66 @@ pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32, rules: &Rul
     };
 
     match s.material {
-        Material::Air => {
-            if me.accept.is_none() {
-                // Accept: the steepest offer aimed at me wins; ties are hashed. A side offer, from
-                // below, is taken only where I could pass the water on downhill, so water never climbs.
-                // A packet is only ever offered to its own gap, which has already accepted it.
-                let passes_on = |from: Dir| {
-                    let far = match from {
-                        Dir::DownLeft => Dir::DownRight,
-                        Dir::DownRight => Dir::DownLeft,
-                        _ => return false,
-                    };
-                    at(Dir::Down).material == Material::Air || at(far).material == Material::Air
-                };
-                let offers = Dir::ALL.into_iter().filter(|&d| {
-                    let n = at(d);
-                    moves(n.material)
-                        && !n.carries
-                        && n.offer == Some(d.opposite())
-                        && (drop(x, y, d) < 0 || passes_on(d))
-                });
-                s.accept = pick(offers, |d| -drop(x, y, d), hash(x, y, phase, SALT_ACCEPT));
-            }
-        }
-        Material::Sand if s.carries => {
-            // My packet is offered back to the gap I came from, which already accepts it and which
-            // the brush leaves alone, so it always goes next phase.
-        }
+        Material::Sand if s.carries => {}
         Material::Sand => {
-            if s.offer.is_some_and(|d| !standing(Material::Sand, d) && !follows(d)) {
-                s.offer = None;
-            }
-            if s.offer.is_none() {
-                // Offer: the steepest downhill neighbor free to take sand (air, or still water) or
-                // to follow; ties are hashed. Nowhere to go: landed, and sand stops dead.
-                let open =
-                    Dir::ALL.into_iter().filter(|&d| drop(x, y, d) > 0 && (free(Material::Sand, d) || follows(d)));
-                match pick(open, |d| drop(x, y, d), hash(x, y, phase, SALT_OFFER)) {
-                    Some(d) => s.offer = start(d, s.speed),
-                    None => s.speed = 0,
-                }
+            // Offer: the steepest downhill neighbor open to sand; ties are hashed. Nowhere to go:
+            // landed, and sand stops dead.
+            let open = Dir::ALL.into_iter().filter(|&d| drop(x, y, d) > 0 && open(Material::Sand, d));
+            match pick(open, |d| drop(x, y, d), hash(x, y, phase, SALT_OFFER)) {
+                Some(d) => s.offer = start(d, s.speed),
+                None => s.speed = 0,
             }
         }
         Material::Water => {
-            let free = |d: Dir| free(Material::Water, d);
-            let standing = |d: Dir| standing(Material::Water, d) || follows(d);
-            if let Some(d) = s.offer {
-                if !standing(d) {
-                    s.offer = None;
-                } else if drop(x, y, d) < 0 && at(d).accept.is_none() {
-                    // A side offer. The air reads it a phase after it is made, so no answer a
-                    // second time means declined: flip, and try the other side.
-                    if s.waited {
-                        s.offer = None;
-                        s.flow = s.flow.flip();
-                    } else {
-                        s.waited = true;
-                    }
-                }
-            }
-            if s.offer.is_none() {
+            // Declined: my side step went unanswered, so I flip and try the other way.
+            if s.waited {
                 s.waited = false;
-                // Fall: straight down first, then the diagonal on the flow side.
-                let flow = s.flow;
-                let open = Dir::ALL.into_iter().filter(|&d| drop(x, y, d) > 0 && (free(d) || follows(d)));
-                match pick(open, |d| 2 * drop(x, y, d) + (Side::of(d) == Some(flow)) as i32, 0) {
-                    // About to fall, so not stepping aside.
-                    Some(d) => s.offer = start(d, s.speed),
-                    None => {
-                        // Landed: water keeps at most the splash. Side step: the flow side first,
-                        // else the other, which becomes the flow. Pushed, by matter above it or above
-                        // it on the side it leaves, the step is free; otherwise it costs a level of
-                        // speed, paid as the offer is made, and with none left the water rests.
-                        s.speed = s.speed.min(rules.splash);
-                        // Matter moving into me (what I just took, as the snapshot still shows it)
-                        // doesn't push.
-                        let pushes = |d: Dir| moves(at(d).material) && at(d).offer != Some(d.opposite());
-                        let pushed = |side: Side| pushes(Dir::Up) || pushes(side.flip().up());
-                        let speed = s.speed;
-                        let step = |side: &Side| free(side.up()) && (speed > 0 || pushed(*side));
-                        if let Some(side) = [flow, flow.flip()].into_iter().find(step) {
-                            s.offer = Some(side.up());
-                            s.flow = side;
-                            if !pushed(side) && within(hash(x, y, phase, SALT_FRICTION), rules.friction) {
-                                s.speed -= 1;
-                            }
-                        }
-                    }
-                }
+                s.flow = s.flow.flip();
             }
-            if s.offer.is_none_or(|d| drop(x, y, d) < 0) && me.accept.is_none() {
-                // Displacement: water that can't fall accepts heavier matter offered from above,
-                // rather than step aside; the steepest offer first, ties hashed.
-                let offers = Dir::ALL.into_iter().filter(|&d| {
-                    let n = at(d);
-                    drop(x, y, d) < 0 && n.offer == Some(d.opposite()) && lighter(Material::Water, n.sends())
-                });
-                if let Some(d) = pick(offers, |d| -drop(x, y, d), hash(x, y, phase, SALT_ACCEPT)) {
-                    s.accept = Some(d);
-                    s.offer = None;
-                    s.waited = false;
+            // Fall: straight down first, then the diagonal on the flow side.
+            let flow = s.flow;
+            let falls = Dir::ALL.into_iter().filter(|&d| drop(x, y, d) > 0 && open(Material::Water, d));
+            let fall = pick(falls, |d| 2 * drop(x, y, d) + (Side::of(d) == Some(flow)) as i32, 0);
+            // Trade: water that can't fall takes heavier matter offered from above rather than
+            // step aside; the steepest offer first, ties hashed. It holds the sand and carries its
+            // own water as a packet, offered straight back to the giver, which takes it on its
+            // next update as it clears: no air ever opens between them.
+            let heavier = Dir::ALL.into_iter().filter(|&d| {
+                let n = at(d);
+                drop(x, y, d) < 0 && n.offer == Some(d.opposite()) && lighter(Material::Water, n.sends())
+            });
+            let trade = if fall.is_none() && s.accept.is_none() {
+                pick(heavier, |d| -drop(x, y, d), hash(x, y, phase, SALT_ACCEPT))
+            } else {
+                None
+            };
+            if let Some(d) = fall {
+                // About to fall, so not stepping aside.
+                s.offer = start(d, s.speed);
+            } else if let Some(d) = trade {
+                s = State { material: at(d).sends(), accept: Some(d), offer: Some(d), carries: true, ..s };
+                s.speed = 0;
+            } else {
+                // Landed: water keeps at most the splash. Side step: the flow side first, else the
+                // other, which becomes the flow. Pushed, by matter above it or above it on the side
+                // it leaves, the step is free; otherwise it costs a level of speed, paid as the
+                // offer is made, and with none left the water rests.
+                s.speed = s.speed.min(rules.splash);
+                // Matter moving into me (a record of what I just took) doesn't push.
+                let pushes = |d: Dir| moves(at(d).material) && at(d).offer != Some(d.opposite());
+                let pushed = |side: Side| pushes(Dir::Up) || pushes(side.flip().up());
+                let speed = s.speed;
+                let step = |side: &Side| open(Material::Water, side.up()) && (speed > 0 || pushed(*side));
+                if let Some(side) = [flow, flow.flip()].into_iter().find(step) {
+                    s.offer = Some(side.up());
+                    s.flow = side;
+                    if !pushed(side) && within(hash(x, y, phase, SALT_FRICTION), rules.friction) {
+                        s.speed -= 1;
+                    }
                 }
             }
         }
-        Material::Slate | Material::Bedrock => {}
+        Material::Air | Material::Slate | Material::Bedrock => {}
     }
     s
 }
@@ -497,18 +479,20 @@ fn pick(candidates: impl Iterator<Item = Dir>, key: impl Fn(Dir) -> i32, bits: u
 
 // The world
 
-/// Bits of a cell's word: its state, its kept-back value and its phase.
-const STATE_BITS: u32 = 11;
+/// A cell keeps two words, one per phase parity: the state it published at a phase goes in the
+/// word of that phase's parity, tagged with the phase. A neighbor at phase `p` reads the word of
+/// `p`'s parity, which the cell doesn't overwrite until it reaches `p + 2`, so a neighbor one phase
+/// ahead still serves it (the kept-back value), and no reader needs another word in step with it.
+const STATE_BITS: u32 = 16;
 const STATE_MASK: u32 = (1 << STATE_BITS) - 1;
-const PHASE_SHIFT: u32 = 2 * STATE_BITS;
-/// The phase is stored in the remaining 10 bits and wraps; neighbors are never more than one apart.
-pub const PHASE_MASK: u32 = (1 << (32 - PHASE_SHIFT)) - 1;
+/// The phase is stored in the top 16 bits and wraps; neighbors are never more than one apart.
+pub const PHASE_MASK: u32 = (1 << (32 - STATE_BITS)) - 1;
 
-fn pack(state: State, kept_back: State, phase: u32) -> u32 {
-    state.encode() | kept_back.encode() << STATE_BITS | (phase & PHASE_MASK) << PHASE_SHIFT
+fn word(state: State, phase: u32) -> u32 {
+    state.encode() | (phase & PHASE_MASK) << STATE_BITS
 }
 
-/// The lattice: one `u32` word per cell, row by row.
+/// The lattice: two `u32` words per cell (see `STATE_BITS`), cell by cell, row by row.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct World {
     width: i32,
@@ -520,8 +504,9 @@ pub struct World {
 
 impl World {
     pub fn new(width: i32, height: i32) -> World {
-        let air = pack(State::AIR, State::AIR, 0);
-        World { width, height, cells: vec![air; (width * height) as usize], rules: Rules::default() }
+        // Phase 0 in the even word; the odd word holds phase -1.
+        let pair = [word(State::AIR, 0), word(State::AIR, PHASE_MASK)];
+        World { width, height, cells: pair.repeat((width * height) as usize), rules: Rules::default() }
     }
 
     pub fn width(&self) -> i32 {
@@ -532,7 +517,7 @@ impl World {
         self.height
     }
 
-    /// The raw cell words, row by row, as the GPU stores them.
+    /// The raw cell words, two per cell, row by row, as the GPU stores them.
     pub fn words(&self) -> &[u32] {
         &self.cells
     }
@@ -545,8 +530,15 @@ impl World {
         (y * self.width + x) as usize
     }
 
+    /// Which of the cell's two words is its current one.
+    fn current(&self, i: usize) -> usize {
+        let (even, odd) = (self.cells[2 * i] >> STATE_BITS, self.cells[2 * i + 1] >> STATE_BITS);
+        if even.wrapping_sub(odd) & PHASE_MASK == 1 { 2 * i } else { 2 * i + 1 }
+    }
+
+    /// What the cell published at its current phase.
     pub fn cell(&self, x: i32, y: i32) -> State {
-        State::decode(self.cells[self.index(x, y)] & STATE_MASK)
+        State::decode(self.cells[self.current(self.index(x, y))] & STATE_MASK)
     }
 
     pub fn material(&self, x: i32, y: i32) -> Material {
@@ -554,54 +546,128 @@ impl World {
     }
 
     pub fn phase(&self, x: i32, y: i32) -> u32 {
-        self.cells[self.index(x, y)] >> PHASE_SHIFT
+        self.cells[self.current(self.index(x, y))] >> STATE_BITS
     }
 
-    /// What the cell holds once any packet in flight has landed: a sinking grain's gap holds the
-    /// water it is about to get back. A world drawn this way holds every packet's water.
-    pub fn landed(&self, x: i32, y: i32) -> Material {
-        let s = self.cell(x, y);
-        let packet = s.accept.is_some_and(|d| {
+    /// The neighbor that took what this cell offered: its acceptance names this cell. Then the
+    /// cell's copy is a record, and the matter (or the packet, if it carries one) is the taker's.
+    pub fn taker(&self, x: i32, y: i32) -> Option<Dir> {
+        Dir::ALL.into_iter().find(|&d| {
             let (nx, ny) = neighbor(x, y, d);
-            self.in_bounds(nx, ny) && self.cell(nx, ny).carries
-        });
-        if s.material == Material::Air && packet { Material::Water } else { s.material }
+            self.in_bounds(nx, ny) && self.cell(nx, ny).accept == Some(d.opposite())
+        })
     }
 
-    /// How many cells' worth of `material` the world holds, packets included.
+    /// What the observer sees: what the cell owns, with a record drawn as what replaces it. A
+    /// giver whose matter was taken reads as air, or as water where the packet of a grain that
+    /// sank from it is on its way back; sand carrying a packet reads as sand. A world drawn this
+    /// way holds every unit of matter exactly once.
+    pub fn looks(&self, x: i32, y: i32) -> Material {
+        let s = self.cell(x, y);
+        match self.taker(x, y) {
+            Some(_) if s.carries => Material::Sand,
+            Some(d) => {
+                let (nx, ny) = neighbor(x, y, d);
+                let t = self.cell(nx, ny);
+                if t.carries && t.offer == Some(d.opposite()) { Material::Water } else { Material::Air }
+            }
+            None => s.material,
+        }
+    }
+
+    /// How many cells' worth of `material` the world owns: packets included, records not.
     pub fn count(&self, material: Material) -> usize {
-        let held = |s: State| (s.material == material) as usize + (s.sends() == material && s.carries) as usize;
-        self.cells.iter().map(|&w| held(State::decode(w & STATE_MASK))).sum()
+        let mut n = 0;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let s = self.cell(x, y);
+                let taken = self.taker(x, y).is_some();
+                n += (s.received() == material && !(taken && !s.carries)) as usize;
+                n += (s.carries && !taken && material == Material::Water) as usize;
+            }
+        }
+        n
+    }
+
+    /// Whether every cell is at the same phase, as after a whole `step`.
+    pub fn uniform(&self) -> bool {
+        let p = self.phase(0, 0);
+        (0..self.height).all(|y| (0..self.width).all(|x| self.phase(x, y) == p))
+    }
+
+    /// The contract rules, checked on a world whose cells share a phase: every offer comes from a
+    /// cell holding moving matter; every acceptance names a giver still holding a record of what
+    /// was taken, offering it nowhere else; no giver is named twice. So every unit of matter has
+    /// exactly one owner.
+    pub fn audit(&self) -> Result<(), String> {
+        let fail = |x: i32, y: i32, why: &str| Err(format!("({x}, {y}): {why}\n{}", self.ascii_intents()));
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let s = self.cell(x, y);
+                if (s.offer.is_some() || s.accept.is_some()) && !moves(s.material) {
+                    return fail(x, y, "an offer or acceptance without matter");
+                }
+                let takers = Dir::ALL
+                    .into_iter()
+                    .filter(|&d| {
+                        let (nx, ny) = neighbor(x, y, d);
+                        self.in_bounds(nx, ny) && self.cell(nx, ny).accept == Some(d.opposite())
+                    })
+                    .count();
+                if takers > 1 {
+                    return fail(x, y, "taken by two neighbors");
+                }
+                let Some(d) = s.accept else { continue };
+                let (gx, gy) = neighbor(x, y, d);
+                if !self.in_bounds(gx, gy) {
+                    return fail(x, y, "accepted from outside the lattice");
+                }
+                let g = self.cell(gx, gy);
+                if g.sends() != s.received() {
+                    return fail(x, y, "the giver holds no record of what was taken");
+                }
+                if g.offer.is_some_and(|e| e != d.opposite()) {
+                    return fail(x, y, "the giver offers what was taken elsewhere");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The brush, the one source and sink of matter: the cell now holds `material` and nothing
     /// in flight. Matter goes only into a cell holding air; erasing (painting air) clears any
-    /// matter but bedrock. Air that has accepted matter is left alone. Call it between phases.
+    /// matter but bedrock. It honors open contracts: a record (a giver whose matter was just taken)
+    /// is left alone, and erasing a receiver leaves air still naming its giver for a phase, so the
+    /// giver clears rather than take the matter back. Call it between phases.
     pub fn paint(&mut self, x: i32, y: i32, material: Material) {
         let here = self.cell(x, y);
-        // Air that has accepted matter is left alone, painting or erasing: the matter arrives next
-        // phase. Above all, a gap a sinking grain left is where its packet of water must go.
         let allowed = match (material, here.material) {
-            (_, Material::Air) => here.accept.is_none() && material != Material::Air,
-            (Material::Air, m) => m != Material::Bedrock,
-            _ => false,
+            (Material::Air, m) => m != Material::Air && m != Material::Bedrock,
+            (_, m) => m == Material::Air && here.accept.is_none(),
         };
-        if !allowed {
+        if !allowed || self.taker(x, y).is_some() {
             return;
         }
-        let i = self.index(x, y);
-        let mut s = State::holding(material);
+        // Erasing a receiver leaves its acceptance standing for a phase, on air: its giver reads it
+        // and clears, as if the matter had stayed. Nothing else moves, so every cell's acceptance is
+        // the same before and after the brush, and each cell decides its own paint.
+        let mut s = State { accept: here.accept, ..State::holding(material) };
         if material == Material::Water && hash(x, y, 0, SALT_FLOW) & 1 == 1 {
             s.flow = Side::Right;
         }
-        self.cells[i] = pack(s, s, self.cells[i] >> PHASE_SHIFT);
+        self.set(x, y, s);
     }
 
-    /// Sets a cell's state outright, for tests that need a particular flow.
+    /// Overwrites the cell's current word, keeping its phase.
+    fn set(&mut self, x: i32, y: i32, s: State) {
+        let i = self.current(self.index(x, y));
+        self.cells[i] = word(s, self.cells[i] >> STATE_BITS);
+    }
+
+    /// Sets a cell's state outright, for tests that need a particular flow or contract.
     #[cfg(test)]
     fn put(&mut self, x: i32, y: i32, s: State) {
-        let i = self.index(x, y);
-        self.cells[i] = pack(s, s, self.cells[i] >> PHASE_SHIFT);
+        self.set(x, y, s);
     }
 
     /// One brush stamp: `paint` every cell whose centre lies within `radius` of `(cx, cy)`, in
@@ -617,38 +683,41 @@ impl World {
         }
     }
 
-    /// Evaluate one cell. It advances one phase unless a neighbor is still behind it, reading
-    /// neighbors a phase ahead from their kept-back values. Returns whether it advanced.
+    /// Evaluate one cell. It advances one phase unless a neighbor is still behind it, reading each
+    /// neighbor's word of its own phase's parity. Returns whether it advanced.
     pub fn update(&mut self, x: i32, y: i32) -> bool {
-        let word = self.cells[self.index(x, y)];
-        let phase = word >> PHASE_SHIFT;
+        let i = self.index(x, y);
+        let phase = self.phase(x, y);
+        let parity = (phase & 1) as usize;
         let mut seen = [State::BEDROCK; 6];
         for d in Dir::ALL {
             let (nx, ny) = neighbor(x, y, d);
             if !self.in_bounds(nx, ny) {
                 continue;
             }
-            let n = self.cells[self.index(nx, ny)];
-            let ahead = (n >> PHASE_SHIFT).wrapping_sub(phase) & PHASE_MASK;
-            let bits = match ahead {
-                0 => n,
-                1 => n >> STATE_BITS,
-                _ => return false, // behind
-            };
-            seen[d as usize] = State::decode(bits & STATE_MASK);
+            let n = self.cells[2 * self.index(nx, ny) + parity];
+            if n >> STATE_BITS != phase {
+                return false; // behind
+            }
+            seen[d as usize] = State::decode(n & STATE_MASK);
         }
-        let me = State::decode(word & STATE_MASK);
-        let i = self.index(x, y);
-        self.cells[i] = pack(next(me, seen, x, y, phase, &self.rules), me, phase + 1);
+        let me = State::decode(self.cells[2 * i + parity] & STATE_MASK);
+        let ahead = phase.wrapping_add(1) & PHASE_MASK;
+        self.cells[2 * i + (ahead & 1) as usize] = word(next(me, seen, x, y, phase, &self.rules), ahead);
         true
     }
 
-    /// One phase for every cell, row by row. Any order gives the same result.
+    /// One phase for every cell, row by row. Any order gives the same result. Debug builds audit
+    /// the contract rules after every step.
     pub fn step(&mut self) {
         for y in 0..self.height {
             for x in 0..self.width {
                 self.update(x, y);
             }
+        }
+        #[cfg(debug_assertions)]
+        if let Err(e) = self.audit() {
+            panic!("contract broken after a step at phase {}: {e}", self.phase(0, 0));
         }
     }
 }
