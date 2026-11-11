@@ -69,6 +69,11 @@ From the repo root:
 - Feel bench: `cargo run -p sand -- bench` measures feel (pile angle, settling, leveling, flow) on the CPU reference and compares with the last run, saved in `target/bench.txt`. Run it before and after a change to a rule.
 - Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.
 
+Running them, with contingencies:
+- Expect competent speeds: the sim tests take about a second and a warm build about 15. A test that waits on the world (settling, a scene reaching some state) caps its phases and fails with `world.ascii()` instead of hanging.
+- Give every command a timeout of a few times its expected run (two minutes for the tests). A run that blows its timeout is a bug to find, not a timeout to raise.
+- Long runs (cold builds, `strip all`, `bench`, the GPU parity test) go in the background and print progress as they go, a line per scene or case, so a stall shows. Add that output to any harness command that lacks it.
+
 Layout: `crates/sim` (CPU reference; its `debug` module draws a world as text, true to the hex offset, for failing assertions: `world.ascii()`, `world.ascii_intents()`, `debug::diff`), `crates/scenes` (preset scenes, scripted brush input and the text format for painted scenes; `run` steps a scene on the CPU reference and measures it), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer; natively, `harness.rs` holds strips and the bench).
 
 ## Environment
