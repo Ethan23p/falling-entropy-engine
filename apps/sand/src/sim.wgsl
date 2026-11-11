@@ -371,18 +371,21 @@ fn next(me: u32, seen: ptr<function, array<u32, 6>>, x: i32, y: i32, phase: u32)
             speed = 0u;
         } else {
             // Landed: keep at most the splash. Side step: the flow side first, else the other.
-            // Pushed, it is free; otherwise it needs speed, and costs a level on the friction chance.
+            // Pushed on the flow side, it is free; otherwise (turning around included) it needs
+            // speed, and costs a level on the friction chance.
             speed = min(speed, params.splash);
+            let free = pushed(seen, flow);
             var side = 2u;
-            if open(WATER, seen, up_of(flow)) && (speed > 0u || pushed(seen, flow)) {
+            if open(WATER, seen, up_of(flow)) && (speed > 0u || free) {
                 side = flow;
-            } else if open(WATER, seen, up_of(1u - flow)) && (speed > 0u || pushed(seen, 1u - flow)) {
+            } else if open(WATER, seen, up_of(1u - flow)) && speed > 0u {
                 side = 1u - flow;
             }
             if side != 2u {
+                let paid = !(side == flow && free);
                 flow = side;
                 offer = up_of(side) + 1u;
-                if !pushed(seen, side) && within(hash(x, y, phase, SALT_FRICTION), params.friction) {
+                if paid && within(hash(x, y, phase, SALT_FRICTION), params.friction) {
                     speed -= 1u;
                 }
             }

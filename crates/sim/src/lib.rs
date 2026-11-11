@@ -421,12 +421,15 @@ pub fn next(me: State, seen: [State; 6], x: i32, y: i32, phase: u32, rules: &Rul
                 // Matter moving into me (a record of what I just took) doesn't push.
                 let pushes = |d: Dir| moves(at(d).material) && at(d).offer != Some(d.opposite());
                 let pushed = |side: Side| pushes(Dir::Up) || pushes(side.flip().up());
+                // Turning around is never free: water pushed against a side that refused it spends
+                // its speed trying, then rests, rather than offering a futile step forever.
                 let speed = s.speed;
-                let step = |side: &Side| open(Material::Water, side.up()) && (speed > 0 || pushed(*side));
+                let free = |side: Side| side == flow && pushed(side);
+                let step = |side: &Side| open(Material::Water, side.up()) && (speed > 0 || free(*side));
                 if let Some(side) = [flow, flow.flip()].into_iter().find(step) {
                     s.offer = Some(side.up());
                     s.flow = side;
-                    if !pushed(side) && within(hash(x, y, phase, SALT_FRICTION), rules.friction) {
+                    if !free(side) && within(hash(x, y, phase, SALT_FRICTION), rules.friction) {
                         s.speed -= 1;
                     }
                 }
@@ -710,14 +713,20 @@ impl World {
     /// One phase for every cell, row by row. Any order gives the same result. Debug builds audit
     /// the contract rules after every step.
     pub fn step(&mut self) {
+        #[cfg(debug_assertions)]
+        let before = [Material::Sand, Material::Water].map(|m| self.count(m));
         for y in 0..self.height {
             for x in 0..self.width {
                 self.update(x, y);
             }
         }
         #[cfg(debug_assertions)]
-        if let Err(e) = self.audit() {
-            panic!("contract broken after a step at phase {}: {e}", self.phase(0, 0));
+        {
+            if let Err(e) = self.audit() {
+                panic!("contract broken after a step at phase {}: {e}", self.phase(0, 0));
+            }
+            let after = [Material::Sand, Material::Water].map(|m| self.count(m));
+            assert_eq!(before, after, "matter not conserved by a step at phase {}", self.phase(0, 0));
         }
     }
 }

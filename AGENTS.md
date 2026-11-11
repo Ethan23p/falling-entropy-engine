@@ -30,16 +30,16 @@ Ethan is the designer and owns the doc. Claude is the engineer and owns the code
 Each version targets one mechanic, the next on the Focus list:
 
 1. Spec the mechanic in the tab: its primitives, plus open questions resolved with Ethan.
-2. Write failing tests, named after the primitive or policy they pin (`offer_*`, `transfer_*`, `conservation_*`).
+2. Write failing tests, named after the primitive or policy they pin (`offer_*`, `contract_*`, `conservation_*`). Tests pin the design, not history: when a version replaces a primitive, the tests that pinned the old one are rewritten or retired, not satisfied. Invariant tests (conservation, order independence) always stay.
 3. Implement until they pass.
 4. Make it playable on desktop and phone, even before it's fun. Ethan plays on a phone.
 5. Commit, with the version prefix.
 
-Adversarial review comes in batches, not every version: a subagent tries to break everything changed since the `reviewed` git tag (conservation, order independence, stuck states, encoding). Run it before each push or deploy, after at most three versions, and right away when a version changes the foundations. Then move the tag: `git tag -f reviewed`.
+Adversarial review comes in batches, not every version: a subagent tries to break everything changed since the `reviewed` git tag (conservation, ambiguous contracts, order independence, stuck states, encoding). Run it before each push or deploy, after at most three versions, and right away when a version changes the foundations. Then move the tag: `git tag -f reviewed`.
 
 Keep it low-key:
 - Tests must stay fast. Compile times must stay low: few dependencies, and the sim crate has none.
-- The foundations (synchrony, the handshake, rendering) get the most care; everything builds on them.
+- The foundations (synchrony, contracts, rendering) get the most care; everything builds on them.
 - Context is a budget. Read only what the step needs; don't re-read the whole doc each session. Start each version in a fresh session, and send wide reading, searching and surveys to subagents, which return only their conclusions.
 - Write code with the file-editing tools, not shell heredocs: the Bash tool's heredocs break on apostrophes.
 - Keep this file accurate when a rule or a command changes. Never put status here.
@@ -66,7 +66,7 @@ From the repo root:
 - GPU parity test (needs a GPU): `cargo test -p sand -- --ignored`.
 - Native window: `cargo run -p sand [-- --scene NAME]`; on the web, `?scene=NAME`. Scenes are presets shared by the game (the Scene choice in the config panel) and the harness. Copy scene, in the config panel, copies the world as a painting's text; save one Ethan sends as `crates/scenes/painted/NAME.fse` and list it in `scenes::ALL` with `Build::Painted(include_str!(...))`.
 - Strips: `cargo run -p sand -- strip SCENE... [--note "a couple words"] [--at 0,1,3,8] [--when settled,level,moving<10] [--set ID=VALUE]` renders a vertical strip of frames, with a header and per-frame metrics, to `target/strips/<scene>.png` and `.txt`. `strip all` does every scene; `strip` alone prints the options. Look at one after any sim or render change.
-- Feel bench: `cargo run -p sand -- bench` measures feel (pile angle, settling, leveling, flow) on the CPU reference and compares with the last run, saved in `target/bench.txt`. Run it before and after a change to a rule.
+- Feel bench: `cargo run -p sand -- bench` measures feel (pile angle, settling, leveling, flow) on the CPU reference and compares with the last run, saved in `target/bench.txt`. Run it before and after a change to a rule. It's an instrument, not a target: when a version changes the rules on purpose, report what moved and why, and let Ethan judge feel in play. Nothing is tuned back toward an earlier version's numbers.
 - Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.
 
 Running them, with contingencies:

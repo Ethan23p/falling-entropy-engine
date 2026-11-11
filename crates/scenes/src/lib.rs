@@ -323,12 +323,7 @@ mod tests {
             run.step();
         }
         let level = run.metrics().level;
-        assert!(
-            level.is_some_and(|l| l <= 6),
-            "dam not down after 2 s: level {level:?}
-{}",
-            run.world.ascii()
-        );
+        assert!(level.is_some_and(|l| l <= 6), "dam not down after 2 s: level {level:?}\n{}", run.world.ascii());
     }
 
     #[test]
