@@ -5,11 +5,10 @@
 //! a line lower, so the column-offset hex lattice keeps its true geometry: a level water surface
 //! reads level, and a diagonal reads as a staircase of half steps.
 //!
-//! Glyphs: `.` air, `:` sand, `~` water, `#` slate, `@` bedrock; sand carrying a packet of water
-//! draws `:` over `~`. Cells are drawn as they publish themselves, so a record (a giver whose
-//! matter was just taken) still shows the matter. With intents (`ascii_intents`), the top line of
-//! a brick shows the way matter is moving, `↑ ↗ ↘ ↓ ↙ ↖`: out along its offer, else in along its
-//! acceptance.
+//! Glyphs: `.` air, `:` sand, `~` water, `#` slate, `@` bedrock. Cells are drawn as they own
+//! matter, so a giver whose offer was accepted draws as what its terms send back: air, or the water
+//! coming back from a trade. With intents (`ascii_intents`), the top line of a brick shows the way
+//! matter is moving, `↑ ↗ ↘ ↓ ↙ ↖`: out along its offer, else in along its acceptance.
 //!
 //! ```text
 //!      012
@@ -59,22 +58,23 @@ impl World {
 
     /// Materials only.
     pub fn ascii(&self) -> String {
-        self.ascii_with(|s| (glyph(s.material), glyph(s.sends())))
+        self.ascii_with(|_, owns| (glyph(owns), glyph(owns)))
     }
 
     /// Materials, with the way matter is moving on the top line of each brick that has an intent.
     pub fn ascii_intents(&self) -> String {
-        self.ascii_with(|s| (motion(s).map_or(glyph(s.material), arrow), glyph(s.sends())))
+        self.ascii_with(|s, owns| (motion(s).map_or(glyph(owns), arrow), glyph(owns)))
     }
 
     /// Draws each cell's brick with `cell`'s two characters, top line first, under a ruler of
-    /// column numbers (mod 10) and beside row numbers.
-    pub fn ascii_with(&self, cell: impl Fn(State) -> (char, char)) -> String {
+    /// column numbers (mod 10) and beside row numbers. `cell` gets what the cell publishes and what
+    /// it owns (`World::looks`).
+    pub fn ascii_with(&self, cell: impl Fn(State, Material) -> (char, char)) -> String {
         let (w, h) = (self.width as usize, self.height as usize);
         let mut lines = vec![vec![' '; w]; 2 * h + 1];
         for y in 0..self.height {
             for x in 0..self.width {
-                let (top, bottom) = cell(self.cell(x, y));
+                let (top, bottom) = cell(self.cell(x, y), self.looks(x, y));
                 let line = (2 * y + (x & 1)) as usize;
                 lines[line][x as usize] = top;
                 lines[line + 1][x as usize] = bottom;
@@ -105,7 +105,7 @@ pub fn diff(want: &World, got: &World) -> Option<String> {
     for &i in &differs {
         marked.set(i as i32 % want.width, i as i32 / want.width, State::holding(Material::Sand));
     }
-    let marks = marked.ascii_with(|s| {
+    let marks = marked.ascii_with(|s, _| {
         let c = if s.material == Material::Sand { 'X' } else { '.' };
         (c, c)
     });
@@ -139,14 +139,21 @@ mod tests {
     }
 
     #[test]
-    fn debug_intents_show_motion_on_both_ends() {
+    fn debug_intents_show_offers_and_acceptances() {
         let mut w = World::new(3, 3);
         w.rules.start = [1 << 16; 4]; // falls at once
         w.paint(1, 0, Material::Sand);
-        w.step(); // offer
-        w.step(); // accept
+        w.step(); // the offer, drawn on the top line of (1, 0), which starts a line lower in an odd column
         let view = w.ascii_intents();
-        assert_eq!(view.matches('↓').count(), 2, "{view}");
+        assert!(
+            view.lines().nth(2).unwrap().contains('↓'),
+            "the giver offers
+{view}"
+        );
+        w.step(); // accepted: the receiver offers onward; the giver draws as the air it clears to
+        let view = w.ascii_intents();
+        assert_eq!(view.matches('↓').count(), 1, "{view}");
+        assert!(!view.lines().nth(2).unwrap().contains('↓') && !view.lines().nth(2).unwrap().contains(':'), "{view}");
     }
 
     #[test]

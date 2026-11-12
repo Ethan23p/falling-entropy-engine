@@ -316,14 +316,18 @@ mod tests {
 
     #[test]
     fn painting_keeps_water_in_flight() {
-        // Mid-trade, some water is a packet inside a grain's cell: the painting draws it
-        // in the gap it is about to fill, so no water is lost.
+        // Mid-trade, a grain's giver still shows the grain while the water is owed back to it by
+        // the terms: the painting draws that water, so none is lost.
         let mut run = run::Run::new(find("sink").unwrap(), 40, 30);
-        let mut saw_packet = false;
+        let mut saw_trade = false;
         for _ in 0..300 {
             run.step();
             let w = &run.world;
-            saw_packet |= (0..w.height()).any(|y| (0..w.width()).any(|x| w.cell(x, y).carries));
+            saw_trade |= (0..w.height()).any(|y| {
+                (0..w.width()).any(|x| {
+                    w.taker(x, y).is_some() && w.material(x, y) == Material::Sand && w.looks(x, y) == Material::Water
+                })
+            });
             let painted = Painting::of(w, "");
             let water = (0..w.height())
                 .flat_map(|y| (0..w.width()).map(move |x| (x, y)))
@@ -331,7 +335,7 @@ mod tests {
                 .count();
             assert_eq!(water, w.count(Material::Water));
         }
-        assert!(saw_packet);
+        assert!(saw_trade);
     }
 
     #[test]

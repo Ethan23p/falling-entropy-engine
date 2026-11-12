@@ -48,7 +48,7 @@ Keep it low-key:
 
 - **Rules live in plain Rust first.** `crates/sim` is the CPU reference simulation: cell state, rules, the counter-based hash. It has no GPU or platform dependencies and is what `cargo test` exercises.
 - **GPU code mirrors the reference.** The WGSL compute shaders implement the same rules bit for bit. A few headless GPU tests, marked `#[ignore]` so normal runs skip them, check that the shaders match the reference.
-- **Every write is a self-write** (the tab's Agency policy: effects on a neighbor travel only as intents it reads), and results never depend on evaluation order. Randomness comes only from the hash of position, phase and salt; never from thread IDs or a sequential RNG inside the sim.
+- **Every write is a self-write** (the tab's Contracts policy: a cell affects a neighbor only by an offer the neighbor answers), and results never depend on evaluation order. Randomness comes only from the hash of position, phase and salt; never from thread IDs or a sequential RNG inside the sim.
 - **The shared engine** (window, frame loop, input, config panel) is the `engine` crate from contra-ethos-games, used as a git dependency pinned to a `rev`. To develop both repos together, create a gitignored `.cargo/config.toml`:
 
   ```toml

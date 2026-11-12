@@ -47,6 +47,16 @@ fn scattered(w: i32, h: i32) -> World {
     world
 }
 
+/// One update of a cell with nothing kept back: no offer waiting on its answer.
+fn fresh(me: State, seen: [State; 6], x: i32, y: i32, phase: u32, rules: &Rules) -> State {
+    next(me, State::AIR, seen, x, y, phase, rules)
+}
+
+/// The rejection bits for the given directions.
+fn rejecting(dirs: &[Dir]) -> u8 {
+    dirs.iter().fold(0, |r, &d| r | 1 << d as u8)
+}
+
 // Geometry
 
 #[test]
@@ -113,13 +123,37 @@ fn hash_low_bit_is_balanced() {
     assert!((4_700..5_300).contains(&ones), "{ones}");
 }
 
-// Contracts: offer, accept (receipt), clear
+// Contracts: offer, answer (acceptance is receipt), clear
+
+/// What a cell sees: air all around, except the given neighbors.
+fn seen(with: &[(Dir, State)]) -> [State; 6] {
+    let mut out = [State::AIR; 6];
+    for &(d, s) in with {
+        out[d as usize] = s;
+    }
+    out
+}
+
+/// Sand offering toward `d`, on terms that nothing comes back.
+fn offering(d: Dir) -> State {
+    State { material: Material::Sand, offer: Some(d), ..State::AIR }
+}
+
+/// Sand offering toward `d` on terms that the water there comes back: a trade.
+fn trading(d: Dir) -> State {
+    State { terms: Material::Water, ..offering(d) }
+}
+
+/// Matter just received from `from`.
+fn received(m: Material, from: Dir) -> State {
+    State { material: m, accept: Some(from), ..State::AIR }
+}
 
 #[test]
 fn offer_sand_offers_straight_down_into_air() {
     let mut w = world(5, 5, &[(2, 1)]);
     w.step();
-    assert_eq!(w.cell(2, 1).offer, Some(Dir::Down));
+    assert_eq!((w.cell(2, 1).offer, w.cell(2, 1).terms), (Some(Dir::Down), Material::Air));
 }
 
 #[test]
@@ -148,13 +182,39 @@ fn offer_even_bottom_cell_slides_to_the_lower_odd_column() {
 }
 
 #[test]
+fn offer_promised_matter_is_neither_offered_again_nor_takes_anything() {
+    // I offered down this phase; the answer comes next phase. Meanwhile my grain is promised: I
+    // make no new offer, and an offer into me is rejected.
+    let me = offering(Dir::Down);
+    let s = fresh(me, seen(&[(Dir::Up, offering(Dir::Down))]), 2, 2, 0, &INSTANT);
+    assert_eq!((s.material, s.offer, s.accept), (Material::Sand, None, None));
+    assert_eq!(s.rejects, rejecting(&[Dir::Up]));
+    // Promised water takes no trade either.
+    let me = State { offer: Some(Dir::UpRight), ..water(Side::Right) };
+    let s = fresh(me, blocked_below(&[(Dir::Up, trading(Dir::Down))]), 2, 2, 0, &INSTANT);
+    assert_eq!((s.material, s.accept, s.rejects), (Material::Water, None, rejecting(&[Dir::Up])));
+}
+
+#[test]
+fn offer_a_cell_offers_every_other_phase_at_most() {
+    // Offer, wait for the answer, offer again: a cell never has two offers out.
+    let mut w = world(3, 30, &[(1, 0)]);
+    for _ in 0..30 {
+        w.step();
+        for y in 0..30 {
+            assert!(!(w.kept(1, y).offer.is_some() && w.cell(1, y).offer.is_some()), "{}", w.ascii_intents());
+        }
+    }
+}
+
+#[test]
 fn contract_acceptance_is_receipt_naming_the_giver() {
     let mut w = world(5, 5, &[(2, 1)]);
     w.step(); // offer
     w.step(); // accept
     let r = w.cell(2, 2);
     assert_eq!((r.material, r.accept), (Material::Sand, Some(Dir::Up)), "{}", w.ascii_intents());
-    // The giver still shows the grain, but only as a record: the grain is the receiver's.
+    // The giver still shows the grain until it reads the acceptance, but the grain is the receiver's.
     assert_eq!(w.material(2, 1), Material::Sand);
     assert_eq!(w.taker(2, 1), Some(Dir::Down));
     assert_eq!((w.looks(2, 1), w.count(Material::Sand)), (Material::Air, 1));
@@ -177,22 +237,54 @@ fn contract_a_receiver_offers_onward_in_the_same_update() {
     assert_eq!(w.cell(2, 2).offer, Some(Dir::Down), "{}", w.ascii_intents());
 }
 
-/// What a cell sees: air all around, except the given neighbors.
-fn seen(with: &[(Dir, State)]) -> [State; 6] {
-    let mut out = [State::AIR; 6];
-    for &(d, s) in with {
-        out[d as usize] = s;
+#[test]
+fn contract_every_offer_gets_an_explicit_answer() {
+    // Three grains offer into one cell of air: it accepts one and rejects the other two, by name.
+    let around = seen(&[
+        (Dir::Up, offering(Dir::Down)),
+        (Dir::UpLeft, offering(Dir::DownRight)),
+        (Dir::UpRight, offering(Dir::DownLeft)),
+    ]);
+    for phase in 0..16 {
+        let s = fresh(State::AIR, around, 2, 2, phase, &INSTANT);
+        assert_eq!((s.accept, s.rejects), (Some(Dir::Up), rejecting(&[Dir::UpLeft, Dir::UpRight])));
     }
-    out
 }
 
-fn offering(d: Dir) -> State {
-    State { material: Material::Sand, offer: Some(d), ..State::AIR }
+#[test]
+fn contract_an_offer_that_cant_be_taken_is_rejected() {
+    // Matter offered into a cell holding matter, or on terms it can't meet, is turned down.
+    let into = |me: State, with: State| fresh(me, seen(&[(Dir::Up, with)]), 2, 2, 0, &INSTANT);
+    for me in [State::holding(Material::Sand), State::SLATE, State::BEDROCK] {
+        let s = into(me, offering(Dir::Down));
+        assert_eq!((s.accept, s.rejects), (None, rejecting(&[Dir::Up])), "{me:?}");
+    }
+    // Air can't send water back, and water taking matter must send its water back.
+    let s = into(State::AIR, trading(Dir::Down));
+    assert_eq!((s.material, s.rejects), (Material::Air, rejecting(&[Dir::Up])));
+    let s = into(water(Side::Left), offering(Dir::Down));
+    assert_eq!((s.material, s.rejects), (Material::Water, rejecting(&[Dir::Up])));
 }
 
-/// Matter just received from `from`.
-fn received(m: Material, from: Dir) -> State {
-    State { material: m, accept: Some(from), ..State::AIR }
+#[test]
+fn contract_an_accepted_offer_clears_to_its_terms() {
+    // I offered down last phase (kept back), and the cell below names me: I clear to air.
+    let kept = offering(Dir::Down);
+    let around = seen(&[(Dir::Down, received(Material::Sand, Dir::Up))]);
+    assert_eq!(next(State::holding(Material::Sand), kept, around, 2, 2, 0, &INSTANT), State::AIR);
+    // On a trade's terms, to water, still.
+    let s = next(State::holding(Material::Sand), trading(Dir::Down), around, 2, 2, 0, &INSTANT);
+    assert_eq!((s.material, s.speed, s.accept), (Material::Water, 0, None));
+}
+
+#[test]
+fn contract_a_rejected_offer_leaves_the_matter_free() {
+    // My offer down-right was turned down: my grain is mine again, free to offer elsewhere now.
+    let kept = offering(Dir::DownRight);
+    let target = State { rejects: rejecting(&[Dir::UpLeft]), ..received(Material::Sand, Dir::Up) };
+    let around = seen(&[(Dir::DownRight, target), (Dir::Down, SLATE)]);
+    let s = next(State::holding(Material::Sand), kept, around, 2, 2, 0, &INSTANT);
+    assert_eq!((s.material, s.offer), (Material::Sand, Some(Dir::DownLeft)));
 }
 
 #[test]
@@ -200,7 +292,8 @@ fn accept_straight_above_beats_a_diagonal() {
     let around = seen(&[(Dir::Up, offering(Dir::Down)), (Dir::UpLeft, offering(Dir::DownRight))]);
     for phase in 0..32 {
         for x in [2, 3] {
-            assert_eq!(next(State::AIR, around, x, 2, phase, &INSTANT).accept, Some(Dir::Up));
+            let s = fresh(State::AIR, around, x, 2, phase, &INSTANT);
+            assert_eq!((s.accept, s.rejects), (Some(Dir::Up), rejecting(&[Dir::UpLeft])));
         }
     }
 }
@@ -208,7 +301,9 @@ fn accept_straight_above_beats_a_diagonal() {
 #[test]
 fn accept_diagonal_ties_are_hashed_and_pick_exactly_one() {
     let around = seen(&[(Dir::UpLeft, offering(Dir::DownRight)), (Dir::UpRight, offering(Dir::DownLeft))]);
-    let picks: Vec<_> = (0..64).map(|phase| next(State::AIR, around, 2, 2, phase, &INSTANT).accept).collect();
+    let picks: Vec<_> = (0..64).map(|phase| fresh(State::AIR, around, 2, 2, phase, &INSTANT)).collect();
+    assert!(picks.iter().all(|s| s.rejects.count_ones() == 1));
+    let picks: Vec<_> = picks.iter().map(|s| s.accept).collect();
     assert!(picks.iter().all(|p| matches!(p, Some(Dir::UpLeft | Dir::UpRight))));
     assert!(picks.contains(&Some(Dir::UpLeft)) && picks.contains(&Some(Dir::UpRight)));
 }
@@ -216,40 +311,8 @@ fn accept_diagonal_ties_are_hashed_and_pick_exactly_one() {
 #[test]
 fn accept_ignores_offers_aimed_elsewhere() {
     let around = seen(&[(Dir::UpLeft, offering(Dir::Down))]);
-    assert_eq!(next(State::AIR, around, 2, 2, 0, &INSTANT).accept, None);
-}
-
-#[test]
-fn contract_a_pending_giver_repeats_or_holds_and_accepts_nothing() {
-    // I offered down last phase; the answer isn't in. A follower offers into me: I can't take it.
-    let me = offering(Dir::Down);
-    let around = seen(&[(Dir::Up, offering(Dir::Down))]);
-    let s = next(me, around, 2, 2, 0, &INSTANT);
-    assert_eq!((s.material, s.offer, s.accept), (Material::Sand, Some(Dir::Down), None), "repeats");
-    // The target now holds still sand: nothing to repeat, so I hold, withdrawing the offer.
-    let s = next(me, seen(&[(Dir::Down, State::holding(Material::Sand))]), 2, 2, 0, &INSTANT);
-    assert_eq!((s.material, s.offer), (Material::Sand, None), "holds");
-}
-
-#[test]
-fn contract_a_declined_giver_learns_and_offers_elsewhere() {
-    // The target took another giver's grain: its acceptance names someone else. I can't repeat a
-    // diagonal into sand, so I hold; next phase the answer is in and I am free to go elsewhere.
-    let me = offering(Dir::DownRight);
-    let target = received(Material::Sand, Dir::Up);
-    let around = seen(&[(Dir::DownRight, target), (Dir::Down, SLATE)]);
-    let held = next(me, around, 2, 2, 0, &INSTANT);
-    assert_eq!(held.offer, None);
-    let free = next(held, around, 2, 2, 1, &INSTANT);
-    assert_eq!(free.offer, Some(Dir::DownLeft));
-}
-
-#[test]
-fn contract_a_receiver_never_takes_the_same_giver_twice_running() {
-    // The giver's repeat of an offer I took is a record of matter I already took. (Air naming a
-    // giver is what the brush leaves when it erases a receiver.)
-    let me = State { accept: Some(Dir::Up), ..State::AIR };
-    assert_eq!(next(me, seen(&[(Dir::Up, offering(Dir::Down))]), 2, 2, 0, &INSTANT).accept, None);
+    let s = fresh(State::AIR, around, 2, 2, 0, &INSTANT);
+    assert_eq!((s.accept, s.rejects), (None, 0));
 }
 
 #[test]
@@ -263,6 +326,28 @@ fn contract_a_fall_takes_a_cell_every_phase_at_the_speed_of_light() {
 }
 
 #[test]
+fn contract_a_falling_column_spaces_out_to_every_fourth_cell() {
+    // A grain's cell is free only once it has read its offer accepted and cleared, two phases after
+    // offering, and the grain above sees that the phase after. So a falling column spaces out to a
+    // grain every fourth cell, and no wider; then it piles back up on the floor.
+    let mut w = World::new(1, 60);
+    w.rules = INSTANT;
+    for y in 0..6 {
+        w.paint(0, y, Material::Sand);
+    }
+    let mut widest = 0;
+    for phase in 0..400 {
+        w.step();
+        let ys: Vec<i32> = sand_at(&w).iter().map(|&(_, y)| y).collect();
+        let gap = ys.windows(2).map(|p| p[1] - p[0]).max().unwrap();
+        assert!(gap <= 4, "phase {phase}: {ys:?}\n{}", w.ascii_intents());
+        widest = widest.max(gap);
+    }
+    assert_eq!(widest, 4);
+    assert_eq!(sand_at(&w), (54..60).map(|y| (0, y)).collect::<Vec<_>>());
+}
+
+#[test]
 fn contract_grain_comes_to_rest_on_the_floor() {
     let mut w = world(3, 6, &[(1, 0)]);
     for _ in 0..40 {
@@ -273,26 +358,54 @@ fn contract_grain_comes_to_rest_on_the_floor() {
 }
 
 #[test]
-fn contract_audit_catches_two_owners() {
-    // (2, 1)'s grain taken both by the cell below and by the one down-right.
+fn contract_audit_catches_an_acceptance_of_nothing_offered() {
     let mut w = instant(5, 5);
-    w.put(2, 1, offering(Dir::Down));
     w.put(2, 2, received(Material::Sand, Dir::Up));
-    w.put(3, 1, received(Material::Sand, Dir::UpLeft));
     let err = w.audit().unwrap_err();
-    assert!(err.contains("taken by two"), "{err}");
+    assert!(err.contains("never made"), "{err}");
 }
 
 #[test]
-fn contract_audit_catches_matter_from_nowhere() {
+fn contract_audit_catches_two_owners() {
+    // (2, 1)'s grain, offered down, accepted both below it and down-right of it.
     let mut w = instant(5, 5);
+    w.put_kept(2, 1, offering(Dir::Down));
+    w.put(2, 1, State::holding(Material::Sand));
     w.put(2, 2, received(Material::Sand, Dir::Up));
+    w.put(3, 1, received(Material::Sand, Dir::UpLeft));
     let err = w.audit().unwrap_err();
-    assert!(err.contains("no record"), "{err}");
-    // Or a giver whose record is offered on elsewhere: two owners in waiting.
+    assert!(err.contains("never made"), "{err}");
+}
+
+#[test]
+fn contract_audit_catches_an_unanswered_offer() {
+    let mut w = instant(5, 5);
+    w.put_kept(2, 1, offering(Dir::Down));
+    w.put(2, 1, State::holding(Material::Sand));
+    let err = w.audit().unwrap_err();
+    assert!(err.contains("unanswered"), "{err}");
+    // Or answered twice.
+    w.put(2, 2, State { rejects: rejecting(&[Dir::Up]), ..received(Material::Sand, Dir::Up) });
+    let err = w.audit().unwrap_err();
+    assert!(err.contains("both"), "{err}");
+}
+
+#[test]
+fn contract_audit_catches_promised_matter_offered_again() {
+    let mut w = instant(5, 5);
+    w.put_kept(2, 1, offering(Dir::Down));
     w.put(2, 1, offering(Dir::DownLeft));
+    w.put(2, 2, State { rejects: rejecting(&[Dir::Up]), ..State::AIR });
     let err = w.audit().unwrap_err();
-    assert!(err.contains("elsewhere"), "{err}");
+    assert!(err.contains("already promised"), "{err}");
+}
+
+#[test]
+fn contract_audit_catches_an_offer_without_matter() {
+    let mut w = instant(5, 5);
+    w.put(2, 1, State { offer: Some(Dir::Down), ..State::AIR });
+    let err = w.audit().unwrap_err();
+    assert!(err.contains("doesn't hold"), "{err}");
 }
 
 #[test]
@@ -303,6 +416,34 @@ fn contract_audit_passes_a_busy_world() {
     for _ in 0..200 {
         w.step();
         w.audit().unwrap();
+    }
+}
+
+#[test]
+fn contract_random_worlds_keep_the_rules() {
+    // Worlds of every material, on the instant and the shipped rules: after every step, every unit
+    // of matter has one owner, no offer exists without its matter, and every offer has one answer.
+    for seed in 0..120u32 {
+        let (wd, ht) = (4 + (seed % 9) as i32, 4 + (seed / 9 % 9) as i32);
+        let mut w = World::new(wd, ht);
+        if seed % 2 == 0 {
+            w.rules = INSTANT;
+        }
+        for y in 0..ht {
+            for x in 0..wd {
+                let m = [Material::Air, Material::Sand, Material::Water, Material::Slate]
+                    [(hash(x, y, seed, 31) % 4) as usize];
+                w.paint(x, y, m);
+            }
+        }
+        let counts = [Material::Sand, Material::Water].map(|m| w.count(m));
+        for _ in 0..120 {
+            w.step();
+            if let Err(e) = w.audit() {
+                panic!("seed {seed}: {e}");
+            }
+        }
+        assert_eq!([Material::Sand, Material::Water].map(|m| w.count(m)), counts, "seed {seed}");
     }
 }
 
@@ -408,6 +549,9 @@ fn synchrony_advances_at_most_one_phase_ahead() {
 fn synchrony_kept_back_values_serve_a_neighbor_behind() {
     // Advancing a cell early must not change what its neighbors compute.
     let mut a = scattered(12, 12);
+    for _ in 0..7 {
+        a.step();
+    }
     let mut b = a.clone();
     a.step();
     b.update(5, 3);
@@ -415,10 +559,37 @@ fn synchrony_kept_back_values_serve_a_neighbor_behind() {
     b.update(6, 4);
     for y in 0..12 {
         for x in 0..12 {
-            if b.phase(x, y) == 0 {
+            if b.phase(x, y) == 7 {
                 assert!(b.update(x, y));
             }
         }
+    }
+    assert_eq!(a, b);
+}
+
+#[test]
+fn synchrony_a_ragged_front_of_phases_gives_the_same_world() {
+    // Cells advance whenever their neighbors let them, in a hashed order, so the phase front is
+    // ragged; once every cell reaches the same phase, the world is the one lockstep gives.
+    let mut a = pool(16, 16, 6);
+    for y in 0..8 {
+        for x in 0..16 {
+            if hash(x, y, 0, 21).is_multiple_of(3) {
+                a.paint(x, y, Material::Sand);
+            }
+        }
+    }
+    let mut b = a.clone();
+    for _ in 0..40 {
+        a.step();
+    }
+    let mut tick = 0;
+    while (0..16).any(|y| (0..16).any(|x| b.phase(x, y) < 40)) {
+        let (x, y) = ((hash(tick, 0, 0, 22) % 16) as i32, (hash(tick, 1, 0, 22) % 16) as i32);
+        if b.phase(x, y) < 40 {
+            b.update(x, y);
+        }
+        tick += 1;
     }
     assert_eq!(a, b);
 }
@@ -436,9 +607,9 @@ fn brush_paints_and_erases() {
 
 #[test]
 fn brush_erasing_a_falling_grain_takes_it_whole() {
-    // At top speed a grain is always mid-contract: received in one cell, a record in the one above.
-    // Erasing the receiver leaves air still naming the giver, so the giver clears rather than take
-    // the grain back.
+    // At top speed a grain is often mid-contract: received in one cell, its giver above not yet
+    // cleared. Erasing the receiver leaves air still naming the giver, so the giver clears rather
+    // than take the grain back.
     let mut w = world(5, 8, &[(2, 1)]);
     w.step(); // offer
     w.step(); // accept
@@ -454,40 +625,56 @@ fn brush_erasing_a_falling_grain_takes_it_whole() {
 }
 
 #[test]
-fn brush_leaves_a_record_alone() {
-    // A record reads as air but still holds the grain until it clears; painting or erasing it would
-    // undo or duplicate a finished send.
+fn brush_leaves_an_accepted_giver_alone() {
+    // A giver whose offer was accepted reads as air but still shows the grain until it clears;
+    // painting or erasing it would undo or duplicate a finished send.
     for m in [Material::Air, Material::Sand, Material::Water, Material::Slate] {
         let mut w = world(5, 8, &[(2, 1)]);
         w.step();
         w.step();
-        let record = w.cell(2, 1);
+        let giver = w.cell(2, 1);
         w.paint(2, 1, m);
-        assert_eq!(w.cell(2, 1), record, "{m:?}");
+        assert_eq!(w.cell(2, 1), giver, "{m:?}");
         w.step();
         assert_eq!(w.count(Material::Sand), 1);
     }
+}
+
+#[test]
+fn brush_keeps_a_cells_answers() {
+    // Three grains offer into one cell; painting it before the answers are read keeps them, so
+    // every offer still has its answer.
+    let mut w = world(5, 6, &[(1, 0), (2, 0), (3, 0)]);
+    for x in [1, 3] {
+        w.put(x, 1, State::SLATE);
+    }
+    w.put(2, 2, State::SLATE);
+    w.step(); // offers
+    w.step(); // answers, at (2, 1)
+    let answered = w.cell(2, 1);
+    assert!(answered.rejects != 0 || answered.accept.is_some(), "{}", w.ascii_intents());
+    w.paint(2, 1, Material::Air);
+    let erased = w.cell(2, 1);
+    assert_eq!((erased.accept, erased.rejects), (answered.accept, answered.rejects));
+    w.step();
 }
 
 // Encoding
 
 #[test]
 fn encoding_state_round_trips() {
-    // Only sand and water hold more than a material: an offer and an acceptance, each any direction
-    // or none, and a speed. Water has a flow and may be waiting on a side offer; sand carrying a
-    // packet holds the packet's flow.
-    let erased = State { accept: Some(Dir::UpRight), ..State::AIR };
-    let mut states = vec![State::AIR, erased, State::SLATE, State::BEDROCK];
-    let dirs = [None, Some(Dir::Up), Some(Dir::Down), Some(Dir::UpLeft)];
-    for offer in dirs {
-        for accept in dirs {
-            for speed in 0..=TOP_SPEED {
-                let s = State { offer, accept, speed, ..State::AIR };
-                states.push(State { material: Material::Sand, ..s });
-                for flow in [Side::Left, Side::Right] {
-                    states.push(State { material: Material::Sand, carries: true, flow, ..s });
-                    for waited in [false, true] {
-                        states.push(State { material: Material::Water, flow, waited, ..s });
+    let dirs = [None, Some(Dir::Up), Some(Dir::DownRight), Some(Dir::UpLeft)];
+    let mut states = vec![State::AIR, State::SLATE, State::BEDROCK];
+    for material in [Material::Air, Material::Sand, Material::Water, Material::Slate] {
+        for offer in dirs {
+            for terms in [Material::Air, Material::Water] {
+                for accept in dirs {
+                    for rejects in [0, 1, 0b10_1010, 63] {
+                        for speed in 0..=TOP_SPEED {
+                            for flow in [Side::Left, Side::Right] {
+                                states.push(State { material, offer, terms, accept, rejects, speed, flow });
+                            }
+                        }
                     }
                 }
             }
@@ -495,7 +682,7 @@ fn encoding_state_round_trips() {
     }
     for s in states {
         assert_eq!(State::decode(s.encode()), s);
-        assert!(s.encode() < 1 << 13, "13 bits");
+        assert!(s.encode() < 1 << 19, "19 bits");
     }
 }
 
@@ -504,13 +691,22 @@ fn encoding_a_cell_keeps_a_word_per_phase_parity() {
     // The state of phase p goes in word p % 2, tagged with p, so the word a neighbor at p reads
     // stays put until p + 2.
     let mut w = world(3, 3, &[(1, 0)]);
-    const { assert!(STATE_MASK == 0xffff && PHASE_MASK == 0xffff) };
+    const { assert!(STATE_MASK == (1 << 19) - 1 && PHASE_MASK == (1 << 13) - 1) };
     w.step();
     let words = w.words();
     let (even, odd) = (words[2], words[3]);
-    assert_eq!((even >> 16, odd >> 16), (0, 1));
-    assert_eq!(State::decode(even & 0xffff), State::holding(Material::Sand));
-    assert_eq!(State::decode(odd & 0xffff).offer, Some(Dir::Down));
+    assert_eq!((even >> 19, odd >> 19), (0, 1));
+    assert_eq!(State::decode(even & STATE_MASK), State::holding(Material::Sand));
+    assert_eq!(State::decode(odd & STATE_MASK).offer, Some(Dir::Down));
+}
+
+#[test]
+fn encoding_the_older_word_holds_the_offer_waited_on() {
+    let mut w = world(3, 4, &[(1, 0)]);
+    w.step(); // offer
+    w.step(); // answered: the offer is now in the kept-back word
+    assert_eq!((w.kept(1, 0).offer, w.cell(1, 0).offer), (Some(Dir::Down), None));
+    assert_eq!(w.cell(1, 1).accept, Some(Dir::Up));
 }
 
 // Slate
@@ -544,19 +740,20 @@ fn slate_never_moves() {
 }
 
 #[test]
-fn slate_never_offers_or_accepts() {
+fn slate_never_offers_or_accepts_and_rejects_what_is_offered() {
     let around = seen(&[(Dir::Up, offering(Dir::Down))]);
     for phase in 0..8 {
-        assert_eq!(next(SLATE, around, 2, 2, phase, &INSTANT), SLATE);
+        assert_eq!(fresh(SLATE, around, 2, 2, phase, &INSTANT), State { rejects: rejecting(&[Dir::Up]), ..SLATE });
+        assert_eq!(fresh(SLATE, seen(&[]), 2, 2, phase, &INSTANT), SLATE);
     }
 }
 
 #[test]
 fn offer_sand_never_offers_to_slate() {
     let walled = seen(&[(Dir::Down, SLATE), (Dir::DownLeft, SLATE), (Dir::DownRight, SLATE)]);
-    assert_eq!(next(State::holding(Material::Sand), walled, 2, 2, 0, &INSTANT).offer, None);
+    assert_eq!(fresh(State::holding(Material::Sand), walled, 2, 2, 0, &INSTANT).offer, None);
     let gap = seen(&[(Dir::Down, SLATE), (Dir::DownRight, SLATE)]);
-    assert_eq!(next(State::holding(Material::Sand), gap, 2, 2, 0, &INSTANT).offer, Some(Dir::DownLeft));
+    assert_eq!(fresh(State::holding(Material::Sand), gap, 2, 2, 0, &INSTANT).offer, Some(Dir::DownLeft));
 }
 
 #[test]
@@ -652,11 +849,11 @@ fn bedrock_is_the_boundary() {
 
 #[test]
 fn bedrock_never_moves_offers_or_accepts() {
-    let bedrock = State::holding(Material::Bedrock);
+    let bedrock = State::BEDROCK;
     let around = seen(&[(Dir::Up, offering(Dir::Down))]);
-    assert_eq!(next(bedrock, around, 2, 2, 0, &INSTANT), bedrock);
+    assert_eq!(fresh(bedrock, around, 2, 2, 0, &INSTANT), State { rejects: rejecting(&[Dir::Up]), ..bedrock });
     let below = seen(&[(Dir::Down, bedrock), (Dir::DownLeft, bedrock), (Dir::DownRight, bedrock)]);
-    assert_eq!(next(State::holding(Material::Sand), below, 2, 2, 0, &INSTANT).offer, None);
+    assert_eq!(fresh(State::holding(Material::Sand), below, 2, 2, 0, &INSTANT).offer, None);
 }
 
 #[test]
@@ -717,76 +914,77 @@ fn water_falls_to_its_flow_side_when_both_diagonals_are_open() {
         let around = seen(&[(Dir::Down, SLATE)]);
         let want = if flow == Side::Left { Dir::DownLeft } else { Dir::DownRight };
         for phase in 0..16 {
-            assert_eq!(next(water(flow), around, 2, 2, phase, &INSTANT).offer, Some(want));
+            assert_eq!(fresh(water(flow), around, 2, 2, phase, &INSTANT).offer, Some(want));
         }
     }
 }
 
 #[test]
-fn side_water_that_cannot_fall_offers_to_its_flow_side() {
-    let s = next(water(Side::Right), blocked_below(&[]), 2, 2, 0, &INSTANT);
-    assert_eq!((s.offer, s.flow, s.waited), (Some(Dir::UpRight), Side::Right, false));
+fn step_water_that_cannot_fall_offers_to_its_flow_side() {
+    let s = fresh(water(Side::Right), blocked_below(&[]), 2, 2, 0, &INSTANT);
+    assert_eq!((s.offer, s.terms, s.flow), (Some(Dir::UpRight), Material::Air, Side::Right));
     assert_eq!(s.speed, TOP_SPEED - 1, "an unpushed step is paid for");
-    let s = next(water(Side::Left), blocked_below(&[]), 2, 2, 0, &INSTANT);
+    let s = fresh(water(Side::Left), blocked_below(&[]), 2, 2, 0, &INSTANT);
     assert_eq!((s.offer, s.flow), (Some(Dir::UpLeft), Side::Left));
 }
 
 #[test]
-fn side_water_takes_the_other_side_when_its_flow_side_is_shut() {
-    let s = next(water(Side::Right), blocked_below(&[(Dir::UpRight, SLATE)]), 2, 2, 0, &INSTANT);
+fn step_takes_the_other_side_when_its_flow_side_is_shut() {
+    let s = fresh(water(Side::Right), blocked_below(&[(Dir::UpRight, SLATE)]), 2, 2, 0, &INSTANT);
     assert_eq!((s.offer, s.flow), (Some(Dir::UpLeft), Side::Left));
 }
 
 #[test]
-fn side_sand_never_moves_sideways() {
-    let s = next(State::holding(Material::Sand), blocked_below(&[]), 2, 2, 0, &INSTANT);
+fn step_sand_never_moves_sideways() {
+    let s = fresh(State::holding(Material::Sand), blocked_below(&[]), 2, 2, 0, &INSTANT);
     assert_eq!(s.offer, None);
 }
 
 #[test]
-fn side_air_accepts_water_only_where_it_can_fall_on() {
+fn step_air_accepts_water_only_where_it_can_fall_on() {
     // The giver is down-left, offering up-right; the far lower diagonal is down-right.
     let giver = (Dir::DownLeft, water_offering(Dir::UpRight, Side::Right));
     for x in [2, 3] {
         let shut = seen(&[giver, (Dir::Down, SLATE), (Dir::DownRight, SLATE)]);
-        assert_eq!(next(State::AIR, shut, x, 2, 0, &INSTANT).accept, None, "level: declined");
+        let s = fresh(State::AIR, shut, x, 2, 0, &INSTANT);
+        assert_eq!((s.accept, s.rejects), (None, rejecting(&[Dir::DownLeft])), "level: rejected");
         let far_open = seen(&[giver, (Dir::Down, SLATE)]);
-        assert_eq!(next(State::AIR, far_open, x, 2, 0, &INSTANT).accept, Some(Dir::DownLeft));
+        assert_eq!(fresh(State::AIR, far_open, x, 2, 0, &INSTANT).accept, Some(Dir::DownLeft));
         let down_open = seen(&[giver, (Dir::DownRight, SLATE)]);
-        assert_eq!(next(State::AIR, down_open, x, 2, 0, &INSTANT).accept, Some(Dir::DownLeft));
+        assert_eq!(fresh(State::AIR, down_open, x, 2, 0, &INSTANT).accept, Some(Dir::DownLeft));
     }
 }
 
 #[test]
-fn side_offers_lose_to_falls() {
+fn step_side_offers_lose_to_falls() {
     let around = seen(&[
         (Dir::DownLeft, water_offering(Dir::UpRight, Side::Right)),
         (Dir::UpRight, water_offering(Dir::DownLeft, Side::Left)),
     ]);
     for phase in 0..32 {
-        assert_eq!(next(State::AIR, around, 2, 2, phase, &INSTANT).accept, Some(Dir::UpRight));
+        let s = fresh(State::AIR, around, 2, 2, phase, &INSTANT);
+        assert_eq!((s.accept, s.rejects), (Some(Dir::UpRight), rejecting(&[Dir::DownLeft])));
     }
 }
 
 #[test]
-fn side_an_offer_is_made_once_then_declined_and_flow_flips() {
-    // The air reads the offer the next phase; meanwhile the water holds, waiting for the answer.
-    let me = water_offering(Dir::UpRight, Side::Right);
-    let s = next(me, blocked_below(&[]), 2, 2, 0, &INSTANT);
-    assert_eq!((s.offer, s.waited), (None, true), "holds for the answer");
-    // No acceptance names it: declined.
-    let s = next(s, blocked_below(&[]), 2, 2, 1, &INSTANT);
-    assert_eq!((s.offer, s.flow, s.waited), (Some(Dir::UpLeft), Side::Left, false), "declined");
+fn step_rejected_flips_the_flow() {
+    // My step up-right was turned down: I flip, and offer up-left in the same update.
+    let kept = water_offering(Dir::UpRight, Side::Right);
+    let refusal = State { rejects: rejecting(&[Dir::DownLeft]), ..State::AIR };
+    let around = blocked_below(&[(Dir::UpRight, refusal)]);
+    let s = next(water(Side::Right), kept, around, 2, 2, 1, &INSTANT);
+    assert_eq!((s.offer, s.flow), (Some(Dir::UpLeft), Side::Left));
 }
 
 #[test]
 fn contract_receipt_carries_water_and_its_flow() {
     // Received from straight above: the flow carries over.
-    let s = next(State::AIR, seen(&[(Dir::Up, water_offering(Dir::Down, Side::Left))]), 2, 2, 0, &INSTANT);
+    let s = fresh(State::AIR, seen(&[(Dir::Up, water_offering(Dir::Down, Side::Left))]), 2, 2, 0, &INSTANT);
     assert_eq!((s.material, s.flow, s.accept), (Material::Water, Side::Left, Some(Dir::Up)));
     // Received from up-left, moving right: the flow becomes right.
     let around = seen(&[(Dir::UpLeft, water_offering(Dir::DownRight, Side::Left))]);
-    let s = next(State::AIR, around, 2, 2, 0, &INSTANT);
+    let s = fresh(State::AIR, around, 2, 2, 0, &INSTANT);
     assert_eq!((s.material, s.flow), (Material::Water, Side::Right));
 }
 
@@ -886,58 +1084,60 @@ fn pool(w: i32, h: i32, depth: i32) -> World {
 }
 
 #[test]
-fn displace_sand_offers_down_into_still_water() {
-    let around = seen(&[(Dir::Down, water(Side::Left))]);
-    assert_eq!(next(State::holding(Material::Sand), around, 2, 2, 0, &INSTANT).offer, Some(Dir::Down));
+fn trade_sand_offers_into_still_water_on_terms_that_the_water_comes_back() {
+    let s = fresh(State::holding(Material::Sand), seen(&[(Dir::Down, water(Side::Left))]), 2, 2, 0, &INSTANT);
+    assert_eq!((s.offer, s.terms), (Some(Dir::Down), Material::Water));
 }
 
 #[test]
-fn displace_sand_never_offers_to_moving_water() {
+fn trade_sand_never_offers_to_moving_water() {
     let around = seen(&[
         (Dir::Down, water_offering(Dir::DownLeft, Side::Left)),
         (Dir::DownLeft, SLATE),
         (Dir::DownRight, SLATE),
     ]);
-    assert_eq!(next(State::holding(Material::Sand), around, 2, 2, 0, &INSTANT).offer, None);
+    assert_eq!(fresh(State::holding(Material::Sand), around, 2, 2, 0, &INSTANT).offer, None);
 }
 
 #[test]
-fn displace_still_water_accepts_sand_from_above() {
-    // Shut in but for the sand above: the water can't move, so it takes the grain, and holds its
-    // own water as a packet offered straight back.
-    let around = blocked_below(&[(Dir::Up, offering(Dir::Down)), (Dir::UpLeft, SLATE), (Dir::UpRight, SLATE)]);
-    let s = next(water(Side::Right), around, 2, 2, 0, &INSTANT);
-    assert_eq!((s.material, s.carries, s.flow), (Material::Sand, true, Side::Right));
-    assert_eq!((s.accept, s.offer), (Some(Dir::Up), Some(Dir::Up)));
+fn trade_still_water_accepts_sand_and_holds_it() {
+    let s = fresh(water(Side::Right), blocked_below(&[(Dir::Up, trading(Dir::Down))]), 2, 2, 0, &INSTANT);
+    assert_eq!((s.material, s.accept, s.rejects, s.speed), (Material::Sand, Some(Dir::Up), 0, 0));
 }
 
 #[test]
-fn trade_the_giver_takes_the_packet_as_it_clears() {
-    // The water below took my grain and offers its packet back: I clear and take the water in the
-    // same update, before any follower.
-    let me = offering(Dir::Down);
-    let taker = State { offer: Some(Dir::Up), carries: true, flow: Side::Right, ..received(Material::Sand, Dir::Up) };
-    let around = seen(&[(Dir::Down, taker), (Dir::Up, offering(Dir::Down))]);
-    let s = next(me, around, 2, 2, 0, &INSTANT);
-    assert_eq!((s.material, s.accept, s.flow, s.speed), (Material::Water, Some(Dir::Down), Side::Right, 0));
+fn trade_water_under_sand_waits_for_it_rather_than_step_aside() {
+    // Pushed by the grain, the water could step aside; it holds still so the grain can sink into it.
+    for above in [Dir::Up, Dir::UpLeft, Dir::UpRight] {
+        let around = blocked_below(&[(above, State::holding(Material::Sand))]);
+        assert_eq!(fresh(water(Side::Right), around, 2, 2, 0, &INSTANT).offer, None, "{above:?}");
+    }
 }
 
 #[test]
-fn displace_water_that_can_move_does_not_accept() {
-    let s = next(water(Side::Left), seen(&[(Dir::Up, offering(Dir::Down))]), 2, 2, 0, &INSTANT);
-    assert_eq!((s.accept, s.offer), (None, Some(Dir::Down)));
+fn trade_a_grain_sinks_into_a_level_surface() {
+    let mut w = pool(9, 6, 2);
+    w.paint(4, 3, Material::Sand);
+    for _ in 0..40 {
+        w.step();
+    }
+    let [(x, 5)] = sand_at(&w)[..] else { panic!("the grain didn't sink\n{}", w.ascii_intents()) };
+    assert!((3..=5).contains(&x));
 }
 
 #[test]
-fn displace_water_never_accepts_water() {
-    let around = blocked_below(&[(Dir::Up, water_offering(Dir::Down, Side::Left))]);
-    assert_eq!(next(water(Side::Left), around, 2, 2, 0, &INSTANT).accept, None);
+fn trade_water_never_accepts_water() {
+    let into_water = State { terms: Material::Water, ..water_offering(Dir::Down, Side::Left) };
+    for offer in [water_offering(Dir::Down, Side::Left), into_water] {
+        let s = fresh(water(Side::Left), blocked_below(&[(Dir::Up, offer)]), 2, 2, 0, &INSTANT);
+        assert_eq!((s.material, s.accept, s.rejects), (Material::Water, None, rejecting(&[Dir::Up])));
+    }
 }
 
-/// Steps until the water at (2, 4) takes the grain above it. Pushed by the grain at rest, it
-/// may first be waiting on a side step, and accepts nothing until that answer is in.
+/// Steps until the water at (2, 4) takes the grain above it. Pushed by the grain at rest, it may
+/// first be stepping aside itself, and takes nothing while that matter is promised.
 fn take(w: &mut World) {
-    for _ in 0..4 {
+    for _ in 0..8 {
         w.step();
         if w.cell(2, 4).accept == Some(Dir::Up) {
             return;
@@ -948,25 +1148,20 @@ fn take(w: &mut World) {
 
 #[test]
 fn trade_sand_and_water_swap_with_no_air_between() {
-    // A grain on a level pool one row deep: it offers, the water takes it and offers its packet
-    // back, and the grain's old cell takes the packet as it clears.
+    // A grain on a level pool one row deep: it offers, the water takes it, and the grain's old cell
+    // clears to water by the offer's terms.
     let mut w = pool(5, 5, 1);
     w.paint(2, 3, Material::Sand);
-    w.step(); // offer
-    assert_eq!(w.cell(2, 3).offer, Some(Dir::Down), "{}", w.ascii_intents());
     take(&mut w);
     let below = w.cell(2, 4);
-    let contract = (below.material, below.carries, below.accept, below.offer);
-    assert_eq!(contract, (Material::Sand, true, Some(Dir::Up), Some(Dir::Up)));
+    assert_eq!((below.material, below.accept), (Material::Sand, Some(Dir::Up)));
+    assert_eq!(w.kept(2, 3).terms, Material::Water);
     let looks = (w.looks(2, 3), w.looks(2, 4));
-    assert_eq!(looks, (Material::Water, Material::Sand), "the record reads as the packet coming");
-    assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (1, 5), "the packet counts as water");
-    w.step(); // the gap takes the packet
-    let gap = w.cell(2, 3);
-    assert_eq!((gap.material, gap.accept), (Material::Water, Some(Dir::Down)), "{}", w.ascii_intents());
+    assert_eq!(looks, (Material::Water, Material::Sand), "the giver reads as the water coming back");
     assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (1, 5));
-    w.step(); // the grain drops its record of the packet
-    assert_eq!((w.material(2, 4), w.cell(2, 4).carries), (Material::Sand, false));
+    w.step(); // the giver clears to water
+    let gap = w.cell(2, 3);
+    assert_eq!((gap.material, gap.accept), (Material::Water, None), "{}", w.ascii_intents());
     assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (1, 5));
 }
 
@@ -987,7 +1182,7 @@ fn trade_never_opens_air_in_a_pool() {
 }
 
 #[test]
-fn displace_sand_sinks_to_the_floor_of_a_pool() {
+fn trade_sand_sinks_to_the_floor_of_a_pool() {
     let mut w = pool(9, 14, 10);
     w.paint(4, 1, Material::Sand);
     for _ in 0..200 {
@@ -999,23 +1194,7 @@ fn displace_sand_sinks_to_the_floor_of_a_pool() {
 }
 
 #[test]
-fn displace_sand_sinks_slower_than_it_falls() {
-    let reach_floor = |mut w: World| {
-        (1..).find(|_| {
-            w.step();
-            sand_at(&w).first().is_some_and(|&(_, y)| y == 19)
-        })
-    };
-    let (mut dry, wet) = (instant(5, 20), pool(5, 20, 18));
-    dry.paint(2, 1, Material::Sand);
-    let mut wet = wet;
-    wet.paint(2, 1, Material::Sand);
-    let (dry, wet) = (reach_floor(dry).unwrap(), reach_floor(wet).unwrap());
-    assert!(wet > dry + 10, "dry {dry}, wet {wet}");
-}
-
-#[test]
-fn displace_sand_piles_under_water() {
+fn trade_sand_piles_under_water() {
     let mut w = pool(20, 20, 12);
     for y in 1..6 {
         for x in 8..12 {
@@ -1027,9 +1206,8 @@ fn displace_sand_piles_under_water() {
         w.step();
         assert_eq!((w.count(Material::Sand), w.count(Material::Water)), counts);
     }
-    // Settled: no grain has a lighter neighbor downhill, and no packet is left in flight.
+    // Settled: no grain has air or water downhill.
     for (x, y) in sand_at(&w) {
-        assert!(!w.cell(x, y).carries, "a packet left at ({x},{y})\n{}", w.ascii());
         for d in [Dir::Down, Dir::DownLeft, Dir::DownRight] {
             let (nx, ny) = neighbor(x, y, d);
             if w.in_bounds(nx, ny) {
@@ -1044,7 +1222,7 @@ fn displace_sand_piles_under_water() {
 }
 
 #[test]
-fn displace_water_never_sinks_into_sand() {
+fn trade_water_never_sinks_into_sand() {
     let mut w = instant(10, 10);
     for y in 6..10 {
         for x in 0..10 {
@@ -1062,9 +1240,9 @@ fn displace_water_never_sinks_into_sand() {
 }
 
 #[test]
-fn trade_brush_leaves_the_gap_alone() {
-    // A grain sinking through deep water: its gap is a record until it takes the packet back. If
-    // the brush could fill or clear it, the packet would have nowhere to go.
+fn trade_brush_leaves_the_giver_alone() {
+    // A grain sinking through deep water: its giver, accepted, reads as the water coming back
+    // until it clears. If the brush could fill or clear it, that water would be lost or doubled.
     for m in [Material::Water, Material::Sand, Material::Slate, Material::Air] {
         let mut w = instant(5, 6);
         for y in 1..6 {
@@ -1077,36 +1255,38 @@ fn trade_brush_leaves_the_gap_alone() {
         for _ in 0..100 {
             w.step();
             for y in 0..6 {
-                if w.taker(2, y).is_some() && !w.cell(2, y).carries {
-                    let gap = w.cell(2, y);
+                if w.taker(2, y).is_some() && w.looks(2, y) == Material::Water {
+                    let giver = w.cell(2, y);
                     w.paint(2, y, m);
-                    assert_eq!(w.cell(2, y), gap, "{m:?}: the brush leaves the gap alone");
+                    assert_eq!(w.cell(2, y), giver, "{m:?}: the brush leaves the giver alone");
                     tried += 1;
                 }
             }
             assert_eq!(w.count(Material::Water), 25);
         }
         assert!(tried > 3);
-        let [(x, y)] = sand_at(&w)[..] else { panic!("one grain") };
-        assert!(y == 5 && !w.cell(x, y).carries, "{m:?}: the grain reaches the floor\n{}", w.ascii_intents());
+        let [(_, y)] = sand_at(&w)[..] else { panic!("one grain") };
+        assert_eq!(y, 5, "{m:?}: the grain reaches the floor\n{}", w.ascii_intents());
     }
 }
 
 #[test]
-fn trade_brush_erasing_the_taker_takes_grain_and_packet() {
+fn trade_brush_erasing_the_receiver_takes_only_the_grain() {
+    // Mid-trade the water is already owed back to the giver by the terms, so erasing the cell that
+    // took the grain removes the grain and nothing else.
     let mut w = pool(5, 5, 1);
     w.paint(2, 3, Material::Sand);
     take(&mut w);
     w.paint(2, 4, Material::Air);
-    assert_eq!((w.looks(2, 3), w.looks(2, 4)), (Material::Air, Material::Air));
+    assert_eq!((w.looks(2, 3), w.looks(2, 4)), (Material::Water, Material::Air));
     for _ in 0..20 {
         w.step();
-        assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (0, 4), "{}", w.ascii_intents());
+        assert_eq!((w.count(Material::Sand), w.count(Material::Water)), (0, 5), "{}", w.ascii_intents());
     }
 }
 
 #[test]
-fn displace_settles_under_a_busy_brush() {
+fn trade_settles_under_a_busy_brush() {
     for m in [Material::Water, Material::Sand, Material::Slate, Material::Air] {
         let mut w = pool(20, 24, 18);
         for y in 1..5 {
@@ -1120,8 +1300,16 @@ fn displace_settles_under_a_busy_brush() {
             }
             w.step();
         }
+        // Settled: no grain has air or water straight below.
         for (x, y) in sand_at(&w) {
-            assert!(!w.cell(x, y).carries, "{m:?}: a packet stranded at ({x},{y})\n{}", w.ascii());
+            if y + 1 < w.height() {
+                let below = w.looks(x, y + 1);
+                assert!(
+                    !matches!(below, Material::Air | Material::Water),
+                    "{m:?}: ({x},{y}) still sinking\n{}",
+                    w.ascii()
+                );
+            }
         }
     }
 }
@@ -1263,42 +1451,40 @@ fn speed_a_cell_at_top_speed_offers_at_once() {
     let mut table = never;
     table.start[TOP_SPEED as usize] = ALWAYS;
     for phase in 0..32 {
-        assert_eq!(next(fast, seen(&[]), 2, 2, phase, &table).offer, Some(Dir::Down));
-        assert_eq!(next(still, seen(&[]), 2, 2, phase, &table).offer, None, "lingers");
+        assert_eq!(fresh(fast, seen(&[]), 2, 2, phase, &table).offer, Some(Dir::Down));
+        assert_eq!(fresh(still, seen(&[]), 2, 2, phase, &table).offer, None, "lingers");
     }
 }
 
 #[test]
 fn speed_the_start_chance_gates_only_free_falls_into_air() {
-    // Never starting on its own, a grain still slides off a diagonal, follows, and sinks.
+    // Never starting on its own, a grain still slides off a diagonal and trades into water.
     let never = rules(0, 0, 0, 0);
     let sand = State::holding(Material::Sand);
     let slide = seen(&[(Dir::Down, SLATE), (Dir::DownLeft, SLATE)]);
-    assert_eq!(next(sand, slide, 2, 2, 0, &never).offer, Some(Dir::DownRight));
-    let follow = seen(&[(Dir::Down, moving(Material::Sand, Dir::Down, 0))]);
-    assert_eq!(next(sand, follow, 2, 2, 0, &never).offer, Some(Dir::Down));
+    assert_eq!(fresh(sand, slide, 2, 2, 0, &never).offer, Some(Dir::DownRight));
     let sink = seen(&[(Dir::Down, State::holding(Material::Water))]);
-    assert_eq!(next(sand, sink, 2, 2, 0, &never).offer, Some(Dir::Down));
+    assert_eq!(fresh(sand, sink, 2, 2, 0, &never).offer, Some(Dir::Down));
 }
 
 #[test]
 fn contract_receipt_carries_speed_and_a_fall_earns() {
     let me = State::AIR;
     let above = seen(&[(Dir::Up, moving(Material::Sand, Dir::Down, 1))]);
-    assert_eq!(next(me, above, 2, 2, 0, &rules(ALWAYS, ALWAYS, 0, 0)).speed, 2, "earned");
-    assert_eq!(next(me, above, 2, 2, 0, &rules(ALWAYS, 0, 0, 0)).speed, 1, "carried");
+    assert_eq!(fresh(me, above, 2, 2, 0, &rules(ALWAYS, ALWAYS, 0, 0)).speed, 2, "earned");
+    assert_eq!(fresh(me, above, 2, 2, 0, &rules(ALWAYS, 0, 0, 0)).speed, 1, "carried");
     let top = seen(&[(Dir::Up, moving(Material::Sand, Dir::Down, TOP_SPEED))]);
-    assert_eq!(next(me, top, 2, 2, 0, &rules(ALWAYS, ALWAYS, 0, 0)).speed, TOP_SPEED, "bounded");
+    assert_eq!(fresh(me, top, 2, 2, 0, &rules(ALWAYS, ALWAYS, 0, 0)).speed, TOP_SPEED, "bounded");
     // A diagonal fall earns on half the chance.
     let diagonal = seen(&[(Dir::UpLeft, moving(Material::Sand, Dir::DownRight, 1))]);
-    let earned = (0..256).filter(|&p| next(me, diagonal, 2, 2, p, &rules(ALWAYS, ALWAYS, 0, 0)).speed == 2).count();
+    let earned = (0..256).filter(|&p| fresh(me, diagonal, 2, 2, p, &rules(ALWAYS, ALWAYS, 0, 0)).speed == 2).count();
     assert!((96..160).contains(&earned), "{earned} of 256");
 }
 
 #[test]
 fn speed_sand_stops_dead_when_it_lands() {
     let me = State { speed: TOP_SPEED, ..State::holding(Material::Sand) };
-    assert_eq!(next(me, blocked_below(&[]), 2, 2, 0, &Rules::default()).speed, 0);
+    assert_eq!(fresh(me, blocked_below(&[]), 2, 2, 0, &Rules::default()).speed, 0);
 }
 
 #[test]
@@ -1306,7 +1492,7 @@ fn speed_water_keeps_at_most_the_splash_when_it_lands() {
     // Walled in on both sides too, so it can't step aside and spend any.
     let walled = blocked_below(&[(Dir::UpLeft, SLATE), (Dir::UpRight, SLATE)]);
     for splash in 0..=TOP_SPEED {
-        let s = next(water(Side::Left), walled, 2, 2, 0, &rules(ALWAYS, 0, splash, 0));
+        let s = fresh(water(Side::Left), walled, 2, 2, 0, &rules(ALWAYS, 0, splash, 0));
         assert_eq!(s.speed, splash);
     }
 }
@@ -1315,12 +1501,12 @@ fn speed_water_keeps_at_most_the_splash_when_it_lands() {
 fn speed_an_unpushed_side_step_needs_speed_and_spends_it() {
     let costly = rules(ALWAYS, 0, TOP_SPEED, ALWAYS);
     let resting = State { speed: 0, ..water(Side::Right) };
-    assert_eq!(next(resting, blocked_below(&[]), 2, 2, 0, &costly).offer, None, "rests");
-    let s = next(State { speed: 2, ..resting }, blocked_below(&[]), 2, 2, 0, &costly);
+    assert_eq!(fresh(resting, blocked_below(&[]), 2, 2, 0, &costly).offer, None, "rests");
+    let s = fresh(State { speed: 2, ..resting }, blocked_below(&[]), 2, 2, 0, &costly);
     assert_eq!((s.offer, s.speed), (Some(Dir::UpRight), 1));
     // The cost falls on the friction chance.
     let slick = rules(ALWAYS, 0, TOP_SPEED, 0);
-    assert_eq!(next(State { speed: 2, ..resting }, blocked_below(&[]), 2, 2, 0, &slick).speed, 2);
+    assert_eq!(fresh(State { speed: 2, ..resting }, blocked_below(&[]), 2, 2, 0, &slick).speed, 2);
 }
 
 #[test]
@@ -1330,19 +1516,23 @@ fn speed_a_pushed_side_step_is_free() {
     let resting = State { speed: 0, ..water(Side::Right) };
     for pusher in [Dir::Up, Dir::UpLeft] {
         let around = blocked_below(&[(pusher, State::holding(Material::Water))]);
-        let s = next(resting, around, 2, 2, 0, &costly);
+        let s = fresh(resting, around, 2, 2, 0, &costly);
         assert_eq!((s.offer, s.speed), (Some(Dir::UpRight), 0), "pushed from {pusher:?}");
     }
-    // Water moving into it, as the snapshot still shows what it just took, doesn't push.
+    // Matter moving into it doesn't push: matter offered to it, or the giver it just took from,
+    // which still shows the water that is now its own.
     let leaving = blocked_below(&[(Dir::UpLeft, water_offering(Dir::DownRight, Side::Right))]);
-    assert_eq!(next(resting, leaving, 2, 2, 0, &costly).offer, None);
+    assert_eq!(fresh(resting, leaving, 2, 2, 0, &costly).offer, None);
+    let took = State { accept: Some(Dir::UpLeft), ..resting };
+    let giver = blocked_below(&[(Dir::UpLeft, State::holding(Material::Water))]);
+    assert_eq!(fresh(took, giver, 2, 2, 0, &costly).offer, None);
 }
 
 #[test]
-fn speed_displacement_drags_it_to_zero() {
-    let above = blocked_below(&[(Dir::Up, moving(Material::Sand, Dir::Down, TOP_SPEED))]);
-    let s = next(water(Side::Left), above, 2, 2, 0, &Rules::default());
-    assert_eq!((s.material, s.carries, s.speed), (Material::Sand, true, 0));
+fn speed_a_trade_drags_it_to_zero() {
+    let fast = State { terms: Material::Water, ..moving(Material::Sand, Dir::Down, TOP_SPEED) };
+    let s = fresh(water(Side::Left), blocked_below(&[(Dir::Up, fast)]), 2, 2, 0, &Rules::default());
+    assert_eq!((s.material, s.speed), (Material::Sand, 0));
 }
 
 #[test]
@@ -1362,49 +1552,6 @@ fn speed_restless_drops_come_to_rest_on_a_level_pool() {
     }
     assert!(still >= 600, "still moving after 3000 phases\n{}", w.ascii());
     assert_eq!(w.count(Material::Water), water);
-}
-
-// Follow
-
-#[test]
-fn follow_the_cell_takes_its_follower_as_its_grain_leaves() {
-    // My grain was taken by the cell below; the grain above offered into me, so I take it in the
-    // same update I clear.
-    let me = moving(Material::Sand, Dir::Down, 2);
-    let taker = received(Material::Sand, Dir::Up);
-    let around = seen(&[(Dir::Down, taker), (Dir::Up, moving(Material::Sand, Dir::Down, 1))]);
-    let s = next(me, around, 2, 2, 0, &INSTANT);
-    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
-    // With nothing following, I hold air.
-    assert_eq!(next(me, seen(&[(Dir::Down, taker)]), 2, 2, 0, &INSTANT), State::AIR);
-}
-
-#[test]
-fn follow_only_straight_down_into_matter_falling_straight_down() {
-    let sand = State::holding(Material::Sand);
-    let always = rules(ALWAYS, 0, 0, 0);
-    // Below is sand sliding diagonally, and the diagonals are shut: nothing to follow.
-    let sliding = blocked_below(&[(Dir::Down, moving(Material::Sand, Dir::DownLeft, 0))]);
-    assert_eq!(next(sand, sliding, 2, 2, 0, &always).offer, None);
-    let falling = blocked_below(&[(Dir::Down, moving(Material::Water, Dir::Down, 0))]);
-    assert_eq!(next(sand, falling, 2, 2, 0, &always).offer, Some(Dir::Down));
-}
-
-#[test]
-fn follow_a_falling_column_thins_but_never_gaps() {
-    // A column of six grains in a shaft. Each follower takes its cell the phase after the grain
-    // below leaves it, so a falling column thins to a grain every other cell, but no wider; then
-    // it piles back up on the floor.
-    let mut w = World::new(1, 60);
-    for y in 0..6 {
-        w.paint(0, y, Material::Sand);
-    }
-    for phase in 0..400 {
-        w.step();
-        let ys: Vec<i32> = sand_at(&w).iter().map(|&(_, y)| y).collect();
-        assert!(ys.windows(2).all(|p| p[1] - p[0] <= 2), "phase {phase}: {ys:?}\n{}", w.ascii_intents());
-    }
-    assert_eq!(sand_at(&w), (54..60).map(|y| (0, y)).collect::<Vec<_>>());
 }
 
 #[test]
