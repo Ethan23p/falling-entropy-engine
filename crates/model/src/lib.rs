@@ -14,8 +14,8 @@
 //! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
 //! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
 //! There are no swaps or two-way terms. Velocity is carried with the matter but never accumulates:
-//! each phase its size is set by density against gravity, and its direction turns from where it was
-//! by what the neighborhood exerts.
+//! each phase its size is set by density against gravity, and its direction is where it was going,
+//! turned by what the neighborhood exerts.
 
 pub mod debug;
 pub mod scenarios;
@@ -257,10 +257,11 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
     (vx, vy)
 }
 
-/// A carried velocity under this phase's reaction: its direction is the carried one plus the reaction,
-/// its size the reaction's, so velocity persists in direction and never accumulates in size.
+/// A carried velocity under this phase's reaction. Gravity sets its size (density against gravity)
+/// and the neighborhood its direction: the carried direction, turned by the sideways nudge. Matter at
+/// rest starts in gravity's direction.
 fn steer(carried: Vector, reaction: Vector) -> Vector {
-    let raw = (carried.0 + reaction.0, carried.1 + reaction.1);
+    let raw = if carried == (0, 0) { reaction } else { (carried.0 + reaction.0, carried.1) };
     let (size, len) = (speed(reaction), speed(raw));
     if len == 0 {
         return reaction;
