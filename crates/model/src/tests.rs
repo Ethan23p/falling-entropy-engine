@@ -276,58 +276,43 @@ fn offering(matter: Matter, s: Slot) -> State {
 }
 
 #[test]
-fn propose_velocity_keeps_its_direction_and_takes_its_size_from_density() {
+fn propose_moving_matter_keeps_its_direction_and_takes_its_size_from_density() {
     let out = update(State::holding(water((40, 0), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
-    let v = out.matter.velocity;
-    assert_eq!(crate::speed(v), crate::speed((8, 8)), "size from density against gravity, never accumulated");
-    assert!(v.0 > v.1, "the carried direction, rightward, turned down a little by gravity: {v:?}");
-    assert_eq!(out.offers[..4], [false, true, false, false], "right, the way it was already going");
+    assert_eq!(out.matter.velocity, (8, 0), "water's density times gravity, the way it was going");
+    assert_eq!(out.offers[..4], [false, true, false, false], "right, its velocity's way");
 }
 
 #[test]
-fn propose_velocity_from_rest_is_density_against_gravity() {
-    let out = update(State::holding(water((0, 0), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
-    assert_eq!(out.matter.velocity.1, 8, "water's density times gravity, downward");
-    assert_eq!(out.matter.velocity.0.abs(), 8, "denser than the air below: a nudge sideways");
-    assert_eq!(out.offers[..4], [false, false, true, false], "down, its velocity's way");
+fn propose_matter_at_rest_flows_toward_a_lighter_neighbor() {
+    let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    seen[3] = State::AIR;
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
+    assert_eq!(out.matter.velocity, (-8, 0), "toward the vacuum on the left; gravity sets only the size");
+    assert!(out.offers[3]);
+}
+
+#[test]
+fn propose_matter_at_rest_among_its_own_kind_stays_at_rest() {
+    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
+    assert_eq!(out.matter.velocity, (0, 0), "no lighter neighbor, no direction; the lattice has no down");
+    assert!(!out.offering());
 }
 
 #[test]
 fn propose_offers_into_matter_too() {
-    let mut seen = [State::AIR; MAX_SLOTS];
-    seen[2] = State::holding(water((0, 0), 2));
-    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
+    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
     assert!(out.offers[2], "water offers to water: the target decides");
 }
 
 #[test]
 fn propose_never_to_bedrock_which_exerts_nothing() {
-    let mut seen = [State::AIR; MAX_SLOTS];
-    seen[2] = State::BEDROCK;
-    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity.1, 8, "gravity sets the size; bedrock below exerts nothing");
-    assert_eq!(out.matter.velocity.0.abs(), 8, "the air beside is lighter: a nudge toward it");
-    assert!(!out.offers[2] && out.offers[1] != out.offers[3], "left or right, never into bedrock");
-}
-
-#[test]
-fn propose_water_beside_air_is_nudged_toward_it() {
     let mut seen = [State::BEDROCK; MAX_SLOTS];
-    seen[2] = State::holding(water((0, 0), 2));
-    seen[3] = State::AIR;
+    seen[1] = State::AIR;
     let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
-    assert!(out.matter.velocity.0 < 0, "toward the lighter air on the left: {:?}", out.matter.velocity);
-}
-
-#[test]
-fn propose_light_under_heavier_is_nudged_strongly_sideways() {
-    let mut seen = [State::AIR; MAX_SLOTS];
-    seen[0] = State::holding(Matter { material: Material::Sand, velocity: (0, 0), id: 2 });
-    seen[2] = State::holding(water((0, 0), 3));
-    seen[3] = State::holding(water((0, 0), 4));
-    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (16, 8), "toward the lighter side, twice gravity per unit of density difference");
-    assert!(out.offers[1]);
+    assert!(!out.offers[2], "not into the bedrock its velocity points at");
+    assert!(out.offers[1], "the smallest turn that is not bedrock");
 }
 
 #[test]

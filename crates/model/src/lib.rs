@@ -14,8 +14,8 @@
 //! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
 //! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
 //! There are no swaps or two-way terms. Velocity is carried with the matter but never accumulates:
-//! each phase its size is set by density against gravity, and its direction is where it was going,
-//! turned by what the neighborhood exerts.
+//! gravity sets its size, and the neighborhood its direction. Matter at rest flows toward lighter
+//! matter beside it (a vacuum); moving matter keeps its direction.
 
 pub mod debug;
 pub mod scenarios;
@@ -218,65 +218,20 @@ impl State {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rules {
-    /// Gravity's pull, in eighths of a cell per unit of density: matter's velocity downward is its
-    /// density times this. The neighborhood's nudge is proportional to it too.
+    /// Gravity, in eighths of a cell per unit of density: the size of matter's velocity is its density
+    /// times this. It sets no direction; the lattice has no down, only the neighborhood does.
     pub gravity: i32,
-    /// Whether gravity pulls down. Without it, as in a ring laid flat, gravity only sets velocity's
-    /// size, and the one thing that sets a direction is lighter matter (air, a vacuum) beside it.
-    pub down: bool,
 }
 
 impl Default for Rules {
     fn default() -> Rules {
-        Rules { gravity: 8, down: true }
+        Rules { gravity: 8 }
     }
 }
 
 const SALT_SIDE: u32 = 0x30;
 
-/// The material reactions, which set the velocity afresh each phase; it doesn't carry over. Density
-/// against gravity sets its size, downward. Density against the neighborhood nudges its direction
-/// sideways, perpendicular to gravity, toward the lighter side: a nudge if the cell is denser than the
-/// lightest of its lower neighbors, a strong one if it is lighter than the densest of its upper
-/// neighbors. Bedrock is static and exerts nothing, so it doesn't count as a neighbor here.
-fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
-    let (g, d) = (rules.gravity, matter.material.density());
-    let (mut vx, vy) = (0, g * d);
-    let slots = || (0..shape.slots()).filter(|&s| seen[s].matter.material != Material::Bedrock);
-    let density = |s: Slot| seen[s].matter.material.density();
-    let lower = slots().filter(|&s| shape.dir(s).1 > 0).map(density).min().unwrap_or(d);
-    let upper = slots().filter(|&s| shape.dir(s).1 < 0).map(density).max().unwrap_or(d);
-    // Each side's lightest neighbor; a side with only bedrock has none to move toward.
-    let lightest = |sign: i32| slots().filter(|&s| shape.dir(s).0 * sign > 0).map(density).min().unwrap_or(i32::MAX);
-    let beside = lightest(-1).min(lightest(1));
-    let side = match lightest(-1).cmp(&lightest(1)) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Greater => 1,
-        std::cmp::Ordering::Equal => [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize],
-    };
-    if d > lower {
-        vx += side * g * (d - lower);
-    } else if d < upper {
-        vx += side * 2 * g * (upper - d);
-    } else if d > beside {
-        vx += side * g * (d - beside);
-    }
-    (vx, vy)
-}
-
-/// A carried velocity under this phase's reaction. Gravity sets its size (density against gravity)
-/// and the neighborhood its direction: the carried direction, turned by the sideways nudge. Matter at
-/// rest starts in gravity's direction.
-fn steer(carried: Vector, reaction: Vector) -> Vector {
-    let raw = if carried == (0, 0) { reaction } else { (carried.0 + reaction.0, carried.1) };
-    let (size, len) = (speed(reaction), speed(raw));
-    if len == 0 {
-        return reaction;
-    }
-    (raw.0 * size / len, raw.1 * size / len)
-}
-
-/// Velocity without a downward pull: its size is density times gravity. Moving matter keeps its
+/// Velocity: its size is density times gravity; its direction comes from the neighborhood. Moving matter keeps its
 /// direction; matter at rest flows toward its lightest neighbor lighter than itself, if any.
 fn flow(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
     let size = rules.gravity * matter.material.density();
@@ -335,16 +290,12 @@ pub fn next(
         matter.velocity = (moved.0 * size / len, moved.1 * size / len);
     }
 
-    // Propose: the material reactions set the velocity's size and turn its direction, and matter offers itself to a neighbor, bedrock
+    // Propose: gravity sets the velocity's size and the neighborhood its direction, and matter offers itself to a neighbor, bedrock
     // aside, preferring the one its velocity points at most squarely (the smallest turn), unless its
     // last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
-        matter.velocity = if rules.down {
-            steer(matter.velocity, react(shape, rules, at, matter, seen))
-        } else {
-            flow(shape, rules, at, matter, seen)
-        };
+        matter.velocity = flow(shape, rules, at, matter, seen);
         let v = matter.velocity;
         if !me.offering() && v != (0, 0) {
             let along = |s: Slot| dot(v, shape.dir(s));

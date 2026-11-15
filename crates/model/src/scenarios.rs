@@ -26,12 +26,11 @@ pub enum Start {
     Flowing,
 }
 
-/// A ring one cell wide with bedrock inside and out, laid flat (no downward pull), full of water and
+/// A ring one cell wide with bedrock inside and out, full of water and
 /// started as `start` says. Returns the world and the ring's cells in order, clockwise from the
 /// top-left.
 pub fn ring(shape: Shape, start: Start) -> (World, Vec<usize>) {
     let mut w = World::new(shape, 7, 7);
-    w.rules.down = false;
     let on_ring = |x: i32, y: i32| match shape {
         // The border of the middle 5x5: 16 cells, with four square corners.
         Shape::Square => (1..=5).contains(&x) && (1..=5).contains(&y) && (x == 1 || x == 5 || y == 1 || y == 5),
