@@ -286,9 +286,18 @@ fn offering(matter: Matter, s: Slot) -> State {
 }
 
 #[test]
-fn propose_velocity_is_density_against_gravity_set_afresh() {
-    let out = update(State::holding(water((40, -40), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
-    assert_eq!(out.matter.velocity.1, 8, "water's density times gravity, downward; the old velocity is gone");
+fn propose_velocity_keeps_its_direction_and_takes_its_size_from_density() {
+    let out = update(State::holding(water((40, 0), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
+    let v = out.matter.velocity;
+    assert_eq!(crate::speed(v), crate::speed((8, 8)), "size from density against gravity, never accumulated");
+    assert!(v.0 > v.1, "the carried direction, rightward, turned down a little by gravity: {v:?}");
+    assert_eq!(out.offers[..4], [false, true, false, false], "right, the way it was already going");
+}
+
+#[test]
+fn propose_velocity_from_rest_is_density_against_gravity() {
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
+    assert_eq!(out.matter.velocity.1, 8, "water's density times gravity, downward");
     assert_eq!(out.matter.velocity.0.abs(), 8, "denser than the air below: a nudge sideways");
     assert_eq!(out.offers[..4], [false, false, true, false], "down, its velocity's way");
 }

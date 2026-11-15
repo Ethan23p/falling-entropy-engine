@@ -13,7 +13,9 @@
 //!
 //! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
 //! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
-//! There are no swaps or two-way terms, and velocity is set afresh each phase, not carried.
+//! There are no swaps or two-way terms. Velocity is carried with the matter but never accumulates:
+//! each phase its size is set by density against gravity, and its direction turns from where it was
+//! by what the neighborhood exerts.
 
 pub mod debug;
 pub mod scenarios;
@@ -255,6 +257,17 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
     (vx, vy)
 }
 
+/// A carried velocity under this phase's reaction: its direction is the carried one plus the reaction,
+/// its size the reaction's, so velocity persists in direction and never accumulates in size.
+fn steer(carried: Vector, reaction: Vector) -> Vector {
+    let raw = (carried.0 + reaction.0, carried.1 + reaction.1);
+    let (size, len) = (speed(reaction), speed(raw));
+    if len == 0 {
+        return reaction;
+    }
+    (raw.0 * size / len, raw.1 * size / len)
+}
+
 /// One cell's update, from phase `p` to `p + 1`: its next published state, from what it published at
 /// `p` (`me`) and at `p - 1` (`kept`), and what its neighbors published at `p` (`seen`, bedrock beyond
 /// the edge). `at` is the cell's position and `p`.
@@ -289,16 +302,20 @@ pub fn next(
     for s in proposals() {
         verdicts[s] = if Some(s) == chosen { Verdict::Accept } else { Verdict::Reject };
     }
+    // The matter received keeps its velocity's size and points the way it just moved.
     if let Some(s) = chosen {
         matter = seen[s].matter;
+        let (moved, size) = (shape.dir(shape.back(s)), speed(matter.velocity));
+        let len = speed(moved);
+        matter.velocity = (moved.0 * size / len, moved.1 * size / len);
     }
 
-    // Propose: the material reactions set the velocity, and matter offers itself to a neighbor, bedrock
+    // Propose: the material reactions set the velocity's size and turn its direction, and matter offers itself to a neighbor, bedrock
     // aside, preferring the one its velocity points at most squarely (the smallest turn), unless its
     // last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
-        matter.velocity = react(shape, rules, at, matter, seen);
+        matter.velocity = steer(matter.velocity, react(shape, rules, at, matter, seen));
         let v = matter.velocity;
         if !me.offering() && v != (0, 0) {
             let along = |s: Slot| dot(v, shape.dir(s));
