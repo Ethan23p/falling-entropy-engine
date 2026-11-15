@@ -265,8 +265,10 @@ fn water(velocity: Vector, id: u16) -> Matter {
     Matter { material: Material::Water, velocity, id }
 }
 
+/// One update on the square lattice, with persistence such that moving matter always follows its
+/// velocity.
 fn update(me: State, kept: State, seen: [State; MAX_SLOTS]) -> State {
-    next(Shape::Square, &Rules::default(), (0, 0, 0), me, kept, &seen)
+    next(Shape::Square, &Rules { persistence: 1, ..Rules::default() }, (0, 0, 0), me, kept, &seen)
 }
 
 fn offering(matter: Matter, s: Slot) -> State {
@@ -283,13 +285,26 @@ fn propose_moving_matter_keeps_its_direction_and_takes_its_size_from_density() {
 }
 
 #[test]
-fn propose_at_rest_with_nothing_lighter_below_or_heavier_above_stays_at_rest() {
+fn propose_at_rest_offers_to_any_neighbor_at_random() {
     let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
-    seen[1] = State::AIR;
-    seen[3] = State::AIR;
+    seen[0] = State::BEDROCK;
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (0, 0), "air beside exerts nothing; the comparison is below and above");
-    assert!(!out.offering());
+    assert_eq!(out.matter.velocity, (0, 0), "nothing lighter below or heavier above: no velocity");
+    assert!(out.offering() && !out.offers[0], "every neighbor ties, bedrock aside: one at random");
+}
+
+#[test]
+fn propose_slow_matter_follows_its_velocity_only_part_of_the_time() {
+    let rules = Rules { persistence: 24, ..Rules::default() };
+    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    let follows = (0..300)
+        .filter(|&p| {
+            next(Shape::Square, &rules, (0, 0, p), State::holding(water((8, 0), 1)), State::AIR, &seen).offers[1]
+        })
+        .count();
+    // Water's speed is 8 of the 24 at which matter always follows: a third of the time, plus a
+    // quarter of the rest at random.
+    assert!((130..=170).contains(&follows), "followed its velocity {follows} times in 300");
 }
 
 #[test]
