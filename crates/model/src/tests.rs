@@ -295,23 +295,34 @@ fn propose_dense_over_lighter_is_nudged_perpendicular() {
 }
 
 #[test]
-fn propose_light_under_heavier_is_nudged_strongly_perpendicular() {
+fn propose_light_under_heavier_is_nudged_perpendicular_and_gravity_sets_the_size() {
     let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
     for s in [0, 1, 5] {
         seen[s] = State::holding(Matter { material: Material::Sand, velocity: (0, 0), id: 3 });
     }
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
     let v = out.matter.velocity;
-    assert!(v == (16, 0) || v == (-16, 0), "sideways, twice as strong: {v:?}");
+    assert!(v == (8, 0) || v == (-8, 0), "sideways, water's density times gravity: {v:?}");
 }
 
 #[test]
-fn propose_velocity_that_hits_bedrock_turns_to_the_smallest_turn_that_is_not() {
+fn propose_only_where_the_velocity_supports_it() {
     let mut seen = [State::BEDROCK; MAX_SLOTS];
-    seen[1] = State::AIR;
+    seen[0] = State::AIR;
     let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
-    assert!(out.offers[1], "the only neighbor that is not bedrock");
-    assert_eq!(out.matter.velocity, (7, -4), "turned that way, its size kept");
+    assert!(!out.offering(), "pointing into bedrock, with only air behind it: no reversal");
+    assert_eq!(out.matter.velocity, (0, 8));
+}
+
+#[test]
+fn propose_to_qualifying_neighbors_air_for_all_and_water_for_water() {
+    let sand = |id| Matter { material: Material::Sand, velocity: (0, 16), id };
+    let mut seen = [State::BEDROCK; MAX_SLOTS];
+    seen[3] = State::holding(water((0, 0), 2));
+    let out = update(State::holding(sand(1)), State::AIR, seen);
+    assert!(!out.offering(), "sand does not offer into water");
+    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
+    assert!(out.offers[3], "water offers into water");
 }
 
 #[test]

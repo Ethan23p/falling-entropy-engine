@@ -225,10 +225,12 @@ impl Default for Rules {
 
 const SALT_SIDE: u32 = 0x30;
 
-/// Velocity, from the material reactions: denser than the neighborhood's bottom-most contents, a
-/// nudge perpendicular to that, sideways, in proportion to gravity and the difference; else lighter
-/// than its top-most contents, a strong nudge the same way; else nothing. Either side, at random.
-/// Bedrock exerts nothing. Velocity is carried, so matter with none and no nudge stays at rest.
+/// Velocity, from the material reactions. Density against gravity sets its size: density times
+/// gravity; it does not accumulate. Density against the neighborhood turns it: denser than the
+/// neighborhood's bottom-most contents, a nudge perpendicular to that, sideways, in proportion to
+/// gravity and the difference; else lighter than its top-most contents, a strong nudge the same way;
+/// else nothing. Either side, at random. Bedrock exerts nothing. A velocity of nothing has no
+/// direction to size, so matter with none and no nudge stays at rest.
 fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
     let (g, d) = (rules.gravity, matter.material.density());
     // The neighborhood's bottom-most and top-most contents: its lower and upper rows, bedrock aside,
@@ -249,7 +251,8 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
     };
     let side = [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize];
     let v = matter.velocity;
-    (v.0 + side * nudge, v.1)
+    let raw = (v.0 + side * nudge, v.1);
+    if raw == (0, 0) { raw } else { resize(raw, g * d) }
 }
 
 /// `v` at a new size, its angle kept: each component rounds to nearest, and one that is not zero
@@ -297,29 +300,31 @@ pub fn next(
     for s in proposals() {
         verdicts[s] = if Some(s) == chosen { Verdict::Accept } else { Verdict::Reject };
     }
-    // The matter received comes with its energy, as offered.
+    // The matter received comes with its energy, and points the way it moved.
     if let Some(s) = chosen {
         matter = seen[s].matter;
+        matter.velocity = resize(shape.dir(shape.back(s)), speed(matter.velocity));
     }
 
-    // Propose: the neighborhood nudges the velocity, and moving matter offers itself to a neighbor,
-    // bedrock aside, preferring the one its velocity points at most squarely (the smallest turn),
-    // randomly within a priority, unless its last offer is still unanswered.
+    // Propose: the reactions set the velocity, and moving matter offers itself to a qualifying
+    // neighbor, unless its last offer is still unanswered. A neighbor qualifies by its published
+    // state: it holds air, or, for water, water; never bedrock. Matter intends to move in its
+    // velocity's direction, so it offers only where its velocity supports it, turning but never
+    // reversing (within a right angle), and prefers the smallest turn, then randomly.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
         matter.velocity = react(shape, rules, at, matter, seen);
         let v = matter.velocity;
         if !me.offering() && v != (0, 0) {
-            // The smallest nudge first: the neighbor the velocity points at most squarely. Velocity
-            // that hits bedrock turns, to the smallest turn that isn't bedrock, keeping its size.
             let along = |s: Slot| dot(v, shape.dir(s));
-            let bedrock = |s: Slot| seen[s].matter.material == Material::Bedrock;
-            let ahead = best(slots.clone().map(|s| (s, along(s))), at, SALT_OFFER);
-            if let Some(s) = best(slots.clone().filter(|&s| !bedrock(s)).map(|s| (s, along(s))), at, SALT_OFFER) {
+            let qualifies = |s: Slot| match seen[s].matter.material {
+                Material::Air => true,
+                Material::Water => matter.material == Material::Water,
+                _ => false,
+            };
+            let candidates = slots.clone().filter(|&s| qualifies(s) && along(s) >= 0);
+            if let Some(s) = best(candidates.map(|s| (s, along(s))), at, SALT_OFFER) {
                 offers[s] = true;
-                if ahead.is_some_and(bedrock) {
-                    matter.velocity = resize(shape.dir(s), speed(v));
-                }
             }
         }
     }
