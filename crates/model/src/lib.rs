@@ -221,20 +221,15 @@ pub struct Rules {
     /// Gravity, in eighths of a cell per unit of density: the size of matter's velocity is its density
     /// times this. It sets no direction; the lattice has no down, only the neighborhood does.
     pub gravity: i32,
-    /// The speed at which matter always follows its velocity. Slower matter follows it that fraction
-    /// of the time, and otherwise proposes as if at rest: to any neighbor, at random. Matter with high
-    /// velocity moves its way with more persistence.
-    pub persistence: i32,
 }
 
 impl Default for Rules {
     fn default() -> Rules {
-        Rules { gravity: 8, persistence: 8 }
+        Rules { gravity: 8 }
     }
 }
 
 const SALT_SIDE: u32 = 0x30;
-const SALT_PERSIST: u32 = 0x40;
 
 /// Velocity, from the material reactions. Density against gravity sets its size: density times
 /// gravity. Density against the neighborhood turns it: denser than the contents directly below, a
@@ -309,15 +304,14 @@ pub fn next(
     }
 
     // Propose: gravity sets the velocity's size and the neighborhood its direction, and matter offers itself to a neighbor, bedrock
-    // aside, preferring the one its velocity points at most squarely (the smallest turn), with
-    // persistence in proportion to its speed, else at random; unless its last offer is unanswered.
+    // aside, preferring the one its velocity points at most squarely (the smallest turn), randomly
+    // within a priority, unless its last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
         matter.velocity = react(shape, rules, at, matter, seen);
         let v = matter.velocity;
         if !me.offering() {
-            let follows = (hash(at.0, at.1, at.2, SALT_PERSIST) % rules.persistence.max(1) as u32) < speed(v) as u32;
-            let along = |s: Slot| if follows { dot(v, shape.dir(s)) } else { 0 };
+            let along = |s: Slot| dot(v, shape.dir(s));
             let candidates = slots.clone().filter(|&s| along(s) >= 0 && seen[s].matter.material != Material::Bedrock);
             if let Some(s) = best(candidates.map(|s| (s, along(s))), at, SALT_OFFER) {
                 offers[s] = true;
