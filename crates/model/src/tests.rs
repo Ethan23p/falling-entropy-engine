@@ -2,7 +2,7 @@
 //! phase), order independence and the speed of information. Behavior assertions are measuring tools:
 //! when a rule changes on purpose and an outcome moves, report it.
 
-use crate::scenarios::{column, dump, frame, moved, ring, run};
+use crate::scenarios::{Air, column, dump, frame, moved, ring, run};
 use crate::*;
 
 fn check(result: Result<(), String>) {
@@ -81,13 +81,13 @@ fn column_2_wide_water() {
     column_runs("column_2_wide_water", 2, Material::Water);
 }
 
-/// Runs a ring for `phases`, following every unit of water along it. Returns how far each unit
-/// advanced.
-fn circulate(name: &str, shape: Shape, bubbles: usize, phases: u32) -> Vec<usize> {
-    let (mut w, order) = ring(shape, bubbles);
+/// Runs a ring for `phases`, following every unit of water along it. Returns each unit's moves
+/// clockwise and counterclockwise.
+fn circulate(name: &str, shape: Shape, air: Air, phases: u32) -> Vec<(usize, usize)> {
+    let (mut w, order) = ring(shape, air);
     let n = order.len();
     let mut places = scenarios::ring_places(&w, &order);
-    let mut advanced = vec![0; places.len()];
+    let mut advanced = vec![(0, 0); places.len()];
     let mut log = frame(&w);
     check(run(&mut w, phases, |w| {
         let now = scenarios::ring_places(w, &order);
@@ -95,13 +95,17 @@ fn circulate(name: &str, shape: Shape, bubbles: usize, phases: u32) -> Vec<usize
             assert_eq!(id, id2);
             let step = (is + n - was) % n;
             assert!(
-                step <= 1,
+                step <= 1 || step == n - 1,
                 "unit {id} jumped {step} cells along the ring at phase {}
 {}",
                 w.now(),
                 w.ascii()
             );
-            advanced[k] += step;
+            match step {
+                1 => advanced[k].0 += 1,
+                0 => {}
+                _ => advanced[k].1 += 1,
+            }
         }
         places = now;
         if w.now() as usize <= 2 * n {
@@ -109,8 +113,8 @@ fn circulate(name: &str, shape: Shape, bubbles: usize, phases: u32) -> Vec<usize
         }
     }));
     let summary = format!(
-        "{name}: {n} cells, {bubbles} of air, {phases} phases
-advances per unit: {advanced:?}
+        "{name}: {n} cells, air {air:?}, {phases} phases
+moves per unit (clockwise, counterclockwise): {advanced:?}
 
 "
     );
@@ -120,22 +124,32 @@ advances per unit: {advanced:?}
 
 #[test]
 fn ring_square_full() {
-    circulate("ring_square_full", Shape::Square, 0, 256);
+    circulate("ring_square_full", Shape::Square, Air::None, 256);
 }
 
 #[test]
 fn ring_hex_full() {
-    circulate("ring_hex_full", Shape::Hex, 0, 144);
+    circulate("ring_hex_full", Shape::Hex, Air::None, 144);
 }
 
 #[test]
-fn ring_square_with_air() {
-    circulate("ring_square_1_air", Shape::Square, 1, 256);
+fn ring_square_air_at_top() {
+    circulate("ring_square_air_top", Shape::Square, Air::Top, 256);
 }
 
 #[test]
-fn ring_hex_with_air() {
-    circulate("ring_hex_1_air", Shape::Hex, 1, 144);
+fn ring_square_air_at_bottom() {
+    circulate("ring_square_air_bottom", Shape::Square, Air::Bottom, 256);
+}
+
+#[test]
+fn ring_hex_air_at_top() {
+    circulate("ring_hex_air_top", Shape::Hex, Air::Top, 144);
+}
+
+#[test]
+fn ring_hex_air_at_bottom() {
+    circulate("ring_hex_air_bottom", Shape::Hex, Air::Bottom, 144);
 }
 
 // Invariants beyond those `run` checks every phase
@@ -144,8 +158,8 @@ fn worlds() -> Vec<(&'static str, World)> {
     vec![
         ("column 2 wide", column(2, Material::Sand)),
         ("water column", column(2, Material::Water)),
-        ("hex ring", ring(Shape::Hex, 2).0),
-        ("square ring", ring(Shape::Square, 1).0),
+        ("hex ring", ring(Shape::Hex, Air::Top).0),
+        ("square ring", ring(Shape::Square, Air::Bottom).0),
     ]
 }
 
@@ -262,8 +276,7 @@ fn water(velocity: Vector, id: u16) -> Matter {
 }
 
 fn update(me: State, kept: State, seen: [State; MAX_SLOTS]) -> State {
-    let rules = Rules { gravity: 0, ..Rules::default() };
-    next(Shape::Square, &rules, (0, 0, 0), me, kept, &seen)
+    next(Shape::Square, &Rules::default(), (0, 0, 0), me, kept, &seen)
 }
 
 fn offering(matter: Matter, s: Slot) -> State {
@@ -273,21 +286,39 @@ fn offering(matter: Matter, s: Slot) -> State {
 }
 
 #[test]
-fn propose_offers_along_velocity() {
-    let seen = [State::AIR; MAX_SLOTS];
-    let out = update(State::holding(water((8, 0), 1)), State::AIR, seen);
-    assert_eq!(out.offers[..4], [false, true, false, false], "right, its velocity's way");
+fn propose_velocity_is_density_against_gravity_set_afresh() {
+    let out = update(State::holding(water((40, -40), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
+    assert_eq!(out.matter.velocity.1, 8, "water's density times gravity, downward; the old velocity is gone");
+    assert_eq!(out.matter.velocity.0.abs(), 8, "denser than the air below: a nudge sideways");
+    assert_eq!(out.offers[..4], [false, false, true, false], "down, its velocity's way");
 }
 
 #[test]
 fn propose_offers_into_matter_too() {
     let mut seen = [State::AIR; MAX_SLOTS];
-    seen[1] = State::holding(water((0, 0), 2));
-    let out = update(State::holding(water((8, 0), 1)), State::AIR, seen);
-    assert!(out.offers[1], "water offers to water: the target decides");
-    seen[1] = State::BEDROCK;
-    let out = update(State::holding(water((8, 0), 1)), State::AIR, seen);
-    assert!(!out.offers[1] && out.offers[0] != out.offers[2], "never to bedrock: up or down, at right angles");
+    seen[2] = State::holding(water((0, 0), 2));
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
+    assert!(out.offers[2], "water offers to water: the target decides");
+}
+
+#[test]
+fn propose_never_to_bedrock_which_exerts_nothing() {
+    let mut seen = [State::AIR; MAX_SLOTS];
+    seen[2] = State::BEDROCK;
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
+    assert_eq!(out.matter.velocity, (0, 8), "no nudge from the bedrock below");
+    assert!(!out.offers[2] && out.offers[1] != out.offers[3], "the smallest turn: left or right");
+}
+
+#[test]
+fn propose_light_under_heavier_is_nudged_strongly_sideways() {
+    let mut seen = [State::AIR; MAX_SLOTS];
+    seen[0] = State::holding(Matter { material: Material::Sand, velocity: (0, 0), id: 2 });
+    seen[2] = State::holding(water((0, 0), 3));
+    seen[3] = State::holding(water((0, 0), 4));
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
+    assert_eq!(out.matter.velocity, (16, 8), "toward the lighter side, twice gravity per unit of density difference");
+    assert!(out.offers[1]);
 }
 
 #[test]
@@ -306,7 +337,6 @@ fn evaluate_air_accepts_one_proposal_by_priority_and_rejects_the_rest() {
     assert_eq!(out.verdicts[2], Verdict::Accept);
     assert_eq!(out.verdicts[1], Verdict::Reject);
     assert_eq!(out.matter.id, 1, "acceptance is receipt");
-    assert_eq!(out.matter.velocity, (0, -8), "turned along the way it came");
 }
 
 #[test]
@@ -335,5 +365,5 @@ fn resolve_a_rejected_giver_keeps_its_matter_and_offers_again() {
     seen[1].verdicts[3] = Verdict::Reject;
     let out = update(State::holding(water((8, 0), 1)), offering(water((8, 0), 1), 1), seen);
     assert_eq!(out.matter.id, 1);
-    assert!(out.offers[1], "the neighbor shows air now, so it offers there again");
+    assert!(out.offering(), "it offers again");
 }

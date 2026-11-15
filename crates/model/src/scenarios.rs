@@ -15,12 +15,21 @@ pub fn column(width: i32, material: Material) -> World {
     w
 }
 
-/// A ring one cell wide with bedrock inside and out, full of water moving along it, clockwise,
-/// but for `bubbles` cells of air spaced around it. Returns the world and the ring's cells in flow
-/// order. Gravity is off: the ring lies flat, so nothing but the contracts moves the water.
-pub fn ring(shape: Shape, bubbles: usize) -> (World, Vec<usize>) {
+/// Where a ring's one cell of air starts, if it has one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Air {
+    None,
+    /// The ring's top-left cell.
+    Top,
+    /// The ring's lowest cell.
+    Bottom,
+}
+
+/// A ring one cell wide with bedrock inside and out, standing upright under gravity, full of water
+/// but for its cell of `air`. Returns the world and the ring's cells in order, clockwise from the
+/// top-left.
+pub fn ring(shape: Shape, air: Air) -> (World, Vec<usize>) {
     let mut w = World::new(shape, 7, 7);
-    w.rules.gravity = 0;
     let on_ring = |x: i32, y: i32| match shape {
         // The border of the middle 5x5: 16 cells, with four square corners.
         Shape::Square => (1..=5).contains(&x) && (1..=5).contains(&y) && (x == 1 || x == 5 || y == 1 || y == 5),
@@ -44,17 +53,15 @@ pub fn ring(shape: Shape, bubbles: usize) -> (World, Vec<usize>) {
         let (x, y) = w.xy(i);
         w.place(x, y, Material::Bedrock, (0, 0));
     }
-    let n = order.len();
-    for (k, &i) in order.iter().enumerate() {
+    let lowest = *order.iter().max_by_key(|&&i| (2 * w.xy(i).1 + (w.xy(i).0 & 1), -w.xy(i).0)).unwrap();
+    let air = match air {
+        Air::None => None,
+        Air::Top => Some(start),
+        Air::Bottom => Some(lowest),
+    };
+    for &i in &order {
         let (x, y) = w.xy(i);
-        let bubble = bubbles > 0 && k % (n / bubbles) == 0 && k / (n / bubbles) < bubbles;
-        if bubble {
-            w.place(x, y, Material::Air, (0, 0));
-        } else {
-            let ahead = order[(k + 1) % n];
-            let s = (0..shape.slots()).find(|&s| w.neighbor(i, s) == Some(ahead)).unwrap();
-            w.place(x, y, Material::Water, shape.dir(s));
-        }
+        w.place(x, y, if Some(i) == air { Material::Air } else { Material::Water }, (0, 0));
     }
     (w, order)
 }

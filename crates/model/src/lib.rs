@@ -13,7 +13,7 @@
 //!
 //! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
 //! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
-//! There are no swaps or two-way terms, and nothing takes energy away.
+//! There are no swaps or two-way terms, and velocity is set afresh each phase, not carried.
 
 pub mod debug;
 pub mod scenarios;
@@ -216,34 +216,32 @@ impl State {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rules {
-    /// Velocity induced per phase per unit of density, downward, in eighths of a cell. The
-    /// neighborhood's nudge is proportional to it too.
+    /// Gravity's pull, in eighths of a cell per unit of density: matter's velocity downward is its
+    /// density times this. The neighborhood's nudge is proportional to it too.
     pub gravity: i32,
-    /// The most speed matter carries.
-    pub top_speed: i32,
 }
 
 impl Default for Rules {
     fn default() -> Rules {
-        Rules { gravity: 1, top_speed: 64 }
+        Rules { gravity: 8 }
     }
 }
 
 const SALT_SIDE: u32 = 0x30;
 
-/// The material reactions, which set the velocity. Density against gravity induces it downward.
-/// Density against the neighborhood nudges it sideways, perpendicular to gravity, toward the lighter
-/// side: a nudge if the cell is denser than the lightest of its lower neighbors, a strong one if it
-/// is lighter than the densest of its upper neighbors.
+/// The material reactions, which set the velocity afresh each phase; it doesn't carry over. Density
+/// against gravity sets its size, downward. Density against the neighborhood nudges its direction
+/// sideways, perpendicular to gravity, toward the lighter side: a nudge if the cell is denser than the
+/// lightest of its lower neighbors, a strong one if it is lighter than the densest of its upper
+/// neighbors. Bedrock is static and exerts nothing, so it doesn't count as a neighbor here.
 fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
     let (g, d) = (rules.gravity, matter.material.density());
-    let (mut vx, mut vy) = matter.velocity;
-    vy += g * d;
-    let slots = 0..shape.slots();
+    let (mut vx, vy) = (0, g * d);
+    let slots = || (0..shape.slots()).filter(|&s| seen[s].matter.material != Material::Bedrock);
     let density = |s: Slot| seen[s].matter.material.density();
-    let lower = slots.clone().filter(|&s| shape.dir(s).1 > 0).map(density).min().unwrap_or(d);
-    let upper = slots.clone().filter(|&s| shape.dir(s).1 < 0).map(density).max().unwrap_or(d);
-    let weight = |sign: i32| slots.clone().filter(|&s| shape.dir(s).0 * sign > 0).map(density).sum::<i32>();
+    let lower = slots().filter(|&s| shape.dir(s).1 > 0).map(density).min().unwrap_or(d);
+    let upper = slots().filter(|&s| shape.dir(s).1 < 0).map(density).max().unwrap_or(d);
+    let weight = |sign: i32| slots().filter(|&s| shape.dir(s).0 * sign > 0).map(density).sum::<i32>();
     let side = match weight(-1).cmp(&weight(1)) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Greater => 1,
@@ -254,8 +252,7 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
     } else if d < upper {
         vx += side * 2 * g * (upper - d);
     }
-    let v = speed((vx, vy));
-    if v > rules.top_speed { (vx * rules.top_speed / v, vy * rules.top_speed / v) } else { (vx, vy) }
+    (vx, vy)
 }
 
 /// One cell's update, from phase `p` to `p + 1`: its next published state, from what it published at
@@ -280,7 +277,7 @@ pub fn next(
 
     // Evaluate: every proposal to this cell, all together, by priority (how squarely the giver's
     // velocity points here), then randomly. A cell holding air has room for one, and writes itself
-    // holding it, its velocity turned along the way it came; a cell holding matter has none.
+    // holding it; a cell holding matter has none.
     let proposals = || slots.clone().filter(|&s| seen[s].offers[shape.back(s)]);
     let chosen = if matter.is_air() {
         let priority = |s: Slot| dot(seen[s].matter.velocity, shape.dir(shape.back(s)));
@@ -293,14 +290,12 @@ pub fn next(
         verdicts[s] = if Some(s) == chosen { Verdict::Accept } else { Verdict::Reject };
     }
     if let Some(s) = chosen {
-        let giver = seen[s].matter;
-        let (dx, dy) = shape.dir(shape.back(s));
-        let v = speed(giver.velocity);
-        matter = Matter { velocity: (dx * v / 8, dy * v / 8), ..giver };
+        matter = seen[s].matter;
     }
 
-    // Propose: the material reactions set the velocity, and matter offers itself to the neighbor its
-    // velocity points at most squarely (bedrock aside), unless its last offer is still unanswered.
+    // Propose: the material reactions set the velocity, and matter offers itself to a neighbor, bedrock
+    // aside, preferring the one its velocity points at most squarely (the smallest turn), unless its
+    // last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
         matter.velocity = react(shape, rules, at, matter, seen);
