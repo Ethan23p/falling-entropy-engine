@@ -1,0 +1,8 @@
+[package]
+name = "model"
+description = "v01's model, on the CPU: cells, matter, contracts. Built beside v00's rules (crates/sim) until it earns its place. No dependencies."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

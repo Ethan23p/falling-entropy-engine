@@ -75,7 +75,7 @@ Running them, with contingencies:
 - Give every command a timeout of a few times its expected run (two minutes for the tests). A run that blows its timeout is a bug to find, not a timeout to raise.
 - Long runs (cold builds, `strip all`, `bench`, the GPU parity test) go in the background and print progress as they go, a line per scene or case, so a stall shows. Add that output to any harness command that lacks it.
 
-Layout: `crates/sim` (CPU reference; its `debug` module draws a world as text, true to the hex offset, for failing assertions: `world.ascii()`, `world.ascii_intents()`, `debug::diff`), `crates/scenes` (preset scenes, scripted brush input and the text format for painted scenes; `run` steps a scene on the CPU reference and measures it), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer; natively, `harness.rs` holds strips and the bench).
+Layout: `crates/model` (v01's model on the CPU, beside v00 until it replaces it: `next` is one cell's update through its stages, `scenarios` the proving scenarios, whose tests dump frames to `target/model/*.txt`), `crates/sim` (v00's CPU reference; its `debug` module draws a world as text, true to the hex offset, for failing assertions: `world.ascii()`, `world.ascii_intents()`, `debug::diff`), `crates/scenes` (preset scenes, scripted brush input and the text format for painted scenes; `run` steps a scene on the CPU reference and measures it), `apps/sand` (the game: `gpu.rs` buffers and passes, `sim.wgsl` mirroring the reference, `render.wgsl` the observer; natively, `harness.rs` holds strips and the bench).
 
 ## Environment
 
