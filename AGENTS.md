@@ -10,11 +10,11 @@ This file is for orientation and standing rules. It summarizes the **Process** s
    - **Falling Sand Engine** is the backbone. If the code were lost, it should be enough to rebuild it.
      - **Process**: how we work. Read it when a process question comes up; this file is its summary.
      - **Scope**: every feature we're working toward, the current version and its open questions, and the Focus list: the next few, in order. A feature gets a version only once that version is being built.
-     - **Primitives**: the entities, capabilities and policies that exist today.
+     - **Primitives**: the model (entities, capabilities, policies) and the standard vocabulary. Names in the code and tests come from here: cell, matter, material, density, energy, velocity, phase, published state, contract; the update's stages Read, Resolve, Evaluate, Propose, Publish; Execute, Accept, Reject.
      - If the code and the tab disagree, the tab wins. If the tab is silent, ask Ethan, then update the tab.
-   - **Abstractions v1**: the vocabulary, written abstractly. Primitives are carried over from it as mechanics need them.
-   - **CA Reference v5** and **Field-mediated matter**: design options, trade-offs and the MPM notes. Read them when a mechanic touches them, not every session.
-2. **The git log is the progress tracker.** Each commit is prefixed with the version it belongs to, e.g. `v00.01: sand offers to air below`.
+   - **Engine v00 (archive)**: the engine before the v01 rebuild (per-material rules: fall, step, trade, flow). History, not current.
+   - **Abstractions v1**, **CA Reference v5** and **Field-mediated matter**: reference, design options, trade-offs and the MPM notes. Read them when a mechanic touches them, not every session.
+2. **The git log is the progress tracker.** Each commit is prefixed with the version it belongs to, e.g. `v01.00: a column of sand falls and rests`.
 
 ## Roles and decisions
 
@@ -23,14 +23,15 @@ Ethan is the designer and owns the doc. Claude is the engineer and owns the code
 - **Every design decision is open until settled in chat with Ethan.** That covers physics, materials, rules, geometry, conservation and feel. Bring them as two or three concrete options with a recommendation.
 - **A settled decision goes into the tab in the same turn.** Usually that means a primitive; if it can't be settled yet, an open question.
 - **New primitives are added freely** when the implementation needs one. **Settled primitives change with care,** in chat first.
+- **Behavior is found, not prescribed.** Set up the causes (material reactions, contracts) and watch what emerges; intuitions about outcomes are often wrong, and the sim is the judge.
 - Engineering calls (crate layout, encodings, test harness, tooling) are Claude's. Record one in the tab only if it shapes a primitive. A refinement within a settled design can be built first and raised in the wrap-up.
 
 ## Workflow
 
 Each version targets one mechanic, the next on the Focus list:
 
-1. Spec the mechanic in the tab: its primitives, plus open questions resolved with Ethan.
-2. Write failing tests, named after the primitive or policy they pin (`offer_*`, `contract_*`, `conservation_*`). Tests pin the design, not history: when a version replaces a primitive, the tests that pinned the old one are rewritten or retired, not satisfied. Invariant tests (conservation, order independence) always stay.
+1. Spec the mechanic in the tab: its primitives, plus open questions resolved with Ethan. A new model is proved on tiny scenarios (a column, a ring) before it carries the game.
+2. Write failing tests, as many per primitive as it needs, named after the primitive or policy they pin (`propose_*`, `evaluate_*`, `resolve_*`, `conservation_*`). Invariant tests (conservation, order independence, the speed of information) are hard checks and always stay. Behavior tests are measuring tools: when a mechanic changes on purpose and an outcome moves, report it rather than treat it as a bug. When a version replaces a primitive, the tests that pinned the old one are rewritten or retired, not satisfied. Conservation is measured on published state; a cell's state mid-update can look duplicated while a self-write is in transit.
 3. Implement until they pass.
 4. Make it playable on desktop and phone, even before it's fun. Ethan plays on a phone.
 5. Commit, with the version prefix.
@@ -48,7 +49,7 @@ Keep it low-key:
 
 - **Rules live in plain Rust first.** `crates/sim` is the CPU reference simulation: cell state, rules, the counter-based hash. It has no GPU or platform dependencies and is what `cargo test` exercises.
 - **GPU code mirrors the reference.** The WGSL compute shaders implement the same rules bit for bit. A few headless GPU tests, marked `#[ignore]` so normal runs skip them, check that the shaders match the reference.
-- **Every write is a self-write** (the tab's Contracts policy: a cell affects a neighbor only by an offer the neighbor answers), and results never depend on evaluation order. Randomness comes only from the hash of position, phase and salt; never from thread IDs or a sequential RNG inside the sim.
+- **Every write is a self-write**: a cell affects a neighbor only by a contract the neighbor answers, and reads only its neighbors' published state. Results never depend on evaluation order, and information travels at most one cell per phase. Randomness comes only from the hash of position, phase and salt; never from thread IDs or a sequential RNG inside the sim.
 - **The shared engine** (window, frame loop, input, config panel) is the `engine` crate from contra-ethos-games, used as a git dependency pinned to a `rev`. To develop both repos together, create a gitignored `.cargo/config.toml`:
 
   ```toml
