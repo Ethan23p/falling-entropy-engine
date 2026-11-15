@@ -25,7 +25,6 @@ pub fn glyph(material: Material) -> char {
 pub fn arrow(shape: Shape, s: Slot) -> char {
     match shape {
         Shape::Hex => ['↑', '↗', '↘', '↓', '↙', '↖'][s],
-        Shape::Square => ['↑', '→', '↓', '←'][s],
     }
 }
 

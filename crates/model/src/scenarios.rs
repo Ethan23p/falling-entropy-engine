@@ -20,9 +20,8 @@ pub fn column(width: i32, material: Material) -> World {
 pub enum Start {
     /// Full of water at rest.
     Full,
-    /// Full of water at rest but for one cell, the ring's top-left, that has just given its water to
-    /// the cell ahead (clockwise) and, in the same update, received the water from the cell behind,
-    /// which now gives it up. Both moved units point the way they moved.
+    /// Flowing clockwise: every other cell has just given its water to the cell ahead and, in the
+    /// same update, received the water from the cell behind. Each unit points the way it moves.
     Flowing,
 }
 
@@ -32,8 +31,6 @@ pub enum Start {
 pub fn ring(shape: Shape, start: Start) -> (World, Vec<usize>) {
     let mut w = World::new(shape, 7, 7);
     let on_ring = |x: i32, y: i32| match shape {
-        // The border of the middle 5x5: 16 cells, with four square corners.
-        Shape::Square => (1..=5).contains(&x) && (1..=5).contains(&y) && (x == 1 || x == 5 || y == 1 || y == 5),
         // The cells two steps from the centre: 12 cells, with six 60-degree corners.
         Shape::Hex => hex_distance((x, y), (3, 3)) == 2,
     };
@@ -59,26 +56,40 @@ pub fn ring(shape: Shape, start: Start) -> (World, Vec<usize>) {
         w.place(x, y, Material::Water, (0, 0));
     }
     if start == Start::Flowing {
+        // Every other cell has just given its water onward and, in the same update, received the
+        // water from behind; it offers that on. The cells between hold water already given onward,
+        // whose acceptance they read next. Every cell shows water; the vacuum is only ever in
+        // transit, so half the units are shown twice.
         let n = order.len();
-        let (behind, here, ahead) = (order[n - 1], order[0], order[1]);
         let slot =
             |w: &World, from: usize, to: usize| (0..shape.slots()).find(|&s| w.neighbor(from, s) == Some(to)).unwrap();
-        let moved = |w: &World, from: usize, to: usize| crate::Matter {
-            velocity: shape.dir(slot(w, from, to)),
-            ..w.cell(from).matter
-        };
-        let (behind_now, mut behind_kept) = (w.cell(behind), w.cell(behind));
-        // Behind: published an offer to here last phase, which here accepts now; it resolves to air.
-        behind_kept.offers[slot(&w, behind, here)] = true;
-        // Here: in the same update it read that ahead had accepted its water, became air, and
-        // accepted behind's.
-        let mut here_now = crate::State::holding(moved(&w, behind, here));
-        here_now.verdicts[slot(&w, here, behind)] = crate::Verdict::Accept;
-        // Ahead: holds here's water, received the update before.
-        let ahead_now = crate::State::holding(moved(&w, here, ahead));
-        w.seed(behind, behind_now, behind_kept);
-        w.seed(here, here_now, here_now);
-        w.seed(ahead, ahead_now, ahead_now);
+        let fwd = |w: &World, k: usize| slot(w, order[k], order[(k + 1) % n]);
+        let unit = |w: &World, k: usize| crate::Matter { velocity: shape.dir(fwd(w, k)), ..w.cell(order[k]).matter };
+        let mut seeds = Vec::new();
+        for k in 0..n {
+            let (i, back) = (order[k], (k + n - 1) % n);
+            let from_behind = slot(&w, i, order[back]);
+            if k % 2 == 1 {
+                let now = crate::State::holding(unit(&w, k));
+                let mut kept = now;
+                kept.offers[fwd(&w, k)] = true;
+                kept.verdicts[from_behind] = crate::Verdict::Accept;
+                seeds.push((i, now, kept));
+            } else {
+                // Its velocity, if it pointed into bedrock here, turned the way it offers.
+                let mut received = unit(&w, back);
+                if w.neighbor(i, fwd(&w, back)).is_none_or(|b| w.is_bedrock(b)) {
+                    received.velocity = shape.dir(fwd(&w, k));
+                }
+                let mut now = crate::State::holding(received);
+                now.offers[fwd(&w, k)] = true;
+                now.verdicts[from_behind] = crate::Verdict::Accept;
+                seeds.push((i, now, crate::State::holding(unit(&w, (k + 1) % n))));
+            }
+        }
+        for (i, now, kept) in seeds {
+            w.seed(i, now, kept);
+        }
     }
     (w, order)
 }

@@ -13,9 +13,9 @@
 //!
 //! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
 //! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
-//! There are no swaps or two-way terms. Velocity is carried with the matter but never accumulates:
-//! gravity sets its size, and density against the neighborhood turns it. The lattice has no down;
-//! the only downward bias is that comparison, against the contents directly below and above.
+//! There are no swaps or two-way terms. Velocity is carried with the matter, and changes only when
+//! influenced: density against the neighborhood nudges it, and bedrock turns it. The lattice has no
+//! down; the only downward bias is that comparison, against the neighborhood's lower and upper rows.
 
 pub mod debug;
 pub mod scenarios;
@@ -24,16 +24,13 @@ mod tests;
 
 // Lattice
 
-/// The lattice's shape. The game's is hexagonal; the square one proves a contract on the simplest
-/// loop before the hex geometry joins in.
+/// The lattice's shape: hexagonal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
     Hex,
-    Square,
 }
 
-/// A neighbor's place around a cell, clockwise from up: 0 to 5 on the hex lattice, 0 to 3 on the
-/// square one.
+/// A neighbor's place around a cell, clockwise from up: 0 to 5.
 pub type Slot = usize;
 
 /// The most neighbors a cell has.
@@ -46,7 +43,6 @@ impl Shape {
     pub fn slots(self) -> usize {
         match self {
             Shape::Hex => 6,
-            Shape::Square => 4,
         }
     }
 
@@ -54,7 +50,6 @@ impl Shape {
     pub fn dir(self, s: Slot) -> Vector {
         match self {
             Shape::Hex => [(0, -8), (7, -4), (7, 4), (0, 8), (-7, 4), (-7, -4)][s],
-            Shape::Square => [(0, -8), (8, 0), (0, 8), (-8, 0)][s],
         }
     }
 
@@ -72,7 +67,6 @@ impl Shape {
                 [(x, y - 1), (x + 1, y - 1 + odd), (x + 1, y + odd), (x, y + 1), (x - 1, y + odd), (x - 1, y - 1 + odd)]
                     [s]
             }
-            Shape::Square => [(x, y - 1), (x + 1, y), (x, y + 1), (x - 1, y)][s],
         }
     }
 }
@@ -218,8 +212,8 @@ impl State {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rules {
-    /// Gravity, in eighths of a cell per unit of density: the size of matter's velocity is its density
-    /// times this. It sets no direction; the lattice has no down, only the neighborhood does.
+    /// Gravity, in eighths of a cell per unit of density: the density reactions induce velocity in
+    /// proportion to it. It sets no direction; the lattice has no down, only the neighborhood does.
     pub gravity: i32,
 }
 
@@ -231,33 +225,31 @@ impl Default for Rules {
 
 const SALT_SIDE: u32 = 0x30;
 
-/// Velocity, from the material reactions. Density against gravity sets its size: density times
-/// gravity. Density against the neighborhood turns it: denser than the contents directly below, a
-/// nudge perpendicular to that, sideways; lighter than the contents directly above, a strong nudge
-/// the same way; else nothing. Bedrock exerts nothing. The nudge goes the way the velocity already
-/// leans (the smaller turn), or either way at random. Velocity is carried, so matter with none and no
-/// nudge stays at rest.
+/// Velocity, from the material reactions: denser than the neighborhood's bottom-most contents, a
+/// nudge perpendicular to that, sideways, in proportion to gravity and the difference; else lighter
+/// than its top-most contents, a strong nudge the same way; else nothing. Either side, at random.
+/// Bedrock exerts nothing. Velocity is carried, so matter with none and no nudge stays at rest.
 fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
     let (g, d) = (rules.gravity, matter.material.density());
-    let vertical = |down: bool| (0..shape.slots()).find(|&s| shape.dir(s).0 == 0 && (shape.dir(s).1 > 0) == down);
-    let contents =
-        |s: Option<Slot>| s.map(|s| seen[s].matter.material).filter(|&m| m != Material::Bedrock).map(Material::density);
-    let (below, above) = (contents(vertical(true)), contents(vertical(false)));
-    let nudge = match (below, above) {
-        (Some(b), _) if d > b => g * (d - b),
-        (_, Some(a)) if d < a => 2 * g * (a - d),
+    // The neighborhood's bottom-most and top-most contents: its lower and upper rows, bedrock aside,
+    // as their mean density times how many there are.
+    let row = |down: bool| {
+        let ds: Vec<i32> = (0..shape.slots())
+            .filter(|&s| shape.dir(s).1 != 0 && (shape.dir(s).1 > 0) == down)
+            .map(|s| seen[s].matter.material)
+            .filter(|&m| m != Material::Bedrock)
+            .map(Material::density)
+            .collect();
+        (!ds.is_empty()).then(|| (ds.iter().sum::<i32>(), ds.len() as i32))
+    };
+    let nudge = match (row(true), row(false)) {
+        (Some((b, n)), _) if d * n > b => g * (d * n - b) / n,
+        (_, Some((a, n))) if d * n < a => 2 * g * (a - d * n) / n,
         _ => 0,
     };
+    let side = [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize];
     let v = matter.velocity;
-    let side = match v.0.signum() {
-        0 => [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize],
-        lean => lean,
-    };
-    let raw = (v.0 + side * nudge, v.1);
-    if raw == (0, 0) {
-        return (0, 0);
-    }
-    resize(raw, g * d)
+    (v.0 + side * nudge, v.1)
 }
 
 /// `v` at a new size, its angle kept: each component rounds to nearest, and one that is not zero
@@ -305,24 +297,29 @@ pub fn next(
     for s in proposals() {
         verdicts[s] = if Some(s) == chosen { Verdict::Accept } else { Verdict::Reject };
     }
-    // The matter received points the way it just moved, at the size gravity gives it.
+    // The matter received comes with its energy, as offered.
     if let Some(s) = chosen {
         matter = seen[s].matter;
-        matter.velocity = resize(shape.dir(shape.back(s)), rules.gravity * matter.material.density());
     }
 
-    // Propose: gravity sets the velocity's size and the neighborhood its direction, and matter offers itself to a neighbor, bedrock
-    // aside, preferring the one its velocity points at most squarely (the smallest turn), randomly
-    // within a priority, unless its last offer is still unanswered.
+    // Propose: the neighborhood nudges the velocity, and moving matter offers itself to a neighbor,
+    // bedrock aside, preferring the one its velocity points at most squarely (the smallest turn),
+    // randomly within a priority, unless its last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
         matter.velocity = react(shape, rules, at, matter, seen);
         let v = matter.velocity;
-        if !me.offering() {
+        if !me.offering() && v != (0, 0) {
+            // The smallest nudge first: the neighbor the velocity points at most squarely. Velocity
+            // that hits bedrock turns, to the smallest turn that isn't bedrock, keeping its size.
             let along = |s: Slot| dot(v, shape.dir(s));
-            let candidates = slots.clone().filter(|&s| along(s) >= 0 && seen[s].matter.material != Material::Bedrock);
-            if let Some(s) = best(candidates.map(|s| (s, along(s))), at, SALT_OFFER) {
+            let bedrock = |s: Slot| seen[s].matter.material == Material::Bedrock;
+            let ahead = best(slots.clone().map(|s| (s, along(s))), at, SALT_OFFER);
+            if let Some(s) = best(slots.clone().filter(|&s| !bedrock(s)).map(|s| (s, along(s))), at, SALT_OFFER) {
                 offers[s] = true;
+                if ahead.is_some_and(bedrock) {
+                    matter.velocity = resize(shape.dir(s), speed(v));
+                }
             }
         }
     }

@@ -123,18 +123,8 @@ moves per unit (clockwise, counterclockwise): {advanced:?}
 }
 
 #[test]
-fn ring_square_full() {
-    circulate("ring_square_full", Shape::Square, Start::Full, 256);
-}
-
-#[test]
 fn ring_hex_full() {
     circulate("ring_hex_full", Shape::Hex, Start::Full, 144);
-}
-
-#[test]
-fn ring_square_flowing() {
-    circulate("ring_square_flowing", Shape::Square, Start::Flowing, 256);
 }
 
 #[test]
@@ -149,7 +139,6 @@ fn worlds() -> Vec<(&'static str, World)> {
         ("column 2 wide", column(2, Material::Sand)),
         ("water column", column(2, Material::Water)),
         ("hex ring", ring(Shape::Hex, Start::Flowing).0),
-        ("square ring", ring(Shape::Square, Start::Flowing).0),
     ]
 }
 
@@ -245,7 +234,7 @@ fn speed_of_information_at_most_one_cell_per_phase() {
 
 #[test]
 fn conservation_measured_on_published_state_counts_matter_in_transit_once() {
-    let mut w = column(1, Material::Sand);
+    let mut w = column(2, Material::Sand);
     let expected = w.inventory();
     let mut seen_transit = false;
     for _ in 0..10 {
@@ -266,7 +255,7 @@ fn water(velocity: Vector, id: u16) -> Matter {
 }
 
 fn update(me: State, kept: State, seen: [State; MAX_SLOTS]) -> State {
-    next(Shape::Square, &Rules::default(), (0, 0, 0), me, kept, &seen)
+    next(Shape::Hex, &Rules::default(), (0, 0, 0), me, kept, &seen)
 }
 
 fn offering(matter: Matter, s: Slot) -> State {
@@ -275,61 +264,59 @@ fn offering(matter: Matter, s: Slot) -> State {
     st
 }
 
+// Hex slots, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
+
 #[test]
-fn propose_moving_matter_keeps_its_direction_and_takes_its_size_from_density() {
-    let out = update(State::holding(water((40, 0), 1)), State::AIR, [State::AIR; MAX_SLOTS]);
-    assert_eq!(out.matter.velocity, (8, 0), "water's density times gravity, the way it was going");
-    assert_eq!(out.offers[..4], [false, true, false, false], "right, its velocity's way");
+fn propose_moving_matter_keeps_its_velocity_and_offers_its_way() {
+    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
+    assert_eq!(out.matter.velocity, (0, 8), "nothing denser or lighter around: velocity persists");
+    assert!(out.offers[3], "down, its velocity's way, into water: the target decides");
 }
 
 #[test]
-fn propose_at_rest_offers_to_any_neighbor_at_random() {
-    let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
-    seen[0] = State::BEDROCK;
+fn propose_at_rest_offers_nothing() {
+    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (0, 0), "nothing lighter below or heavier above: no velocity");
-    assert!(out.offering() && !out.offers[0], "every neighbor ties, bedrock aside: one at random");
+    assert_eq!(out.matter.velocity, (0, 0));
+    assert!(!out.offering(), "no velocity, no intent to move");
 }
 
 #[test]
 fn propose_dense_over_lighter_is_nudged_perpendicular() {
     let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
-    seen[2] = State::AIR;
+    for s in [2, 3, 4] {
+        seen[s] = State::AIR;
+    }
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity.1, 0, "perpendicular to the density below: sideways");
-    assert_eq!(out.matter.velocity.0.abs(), 8, "size from density against gravity");
-    assert!(out.offers[1] || out.offers[3]);
+    let v = out.matter.velocity;
+    assert!(v == (8, 0) || v == (-8, 0), "sideways, gravity times the density difference: {v:?}");
+    assert!(out.offering());
 }
 
 #[test]
 fn propose_light_under_heavier_is_nudged_strongly_perpendicular() {
     let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
-    seen[0] = State::holding(Matter { material: Material::Sand, velocity: (0, 0), id: 3 });
-    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
+    for s in [0, 1, 5] {
+        seen[s] = State::holding(Matter { material: Material::Sand, velocity: (0, 0), id: 3 });
+    }
+    let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
     let v = out.matter.velocity;
-    assert!(v.0.abs() > v.1, "the strong nudge outweighs the carried velocity: {v:?}");
+    assert!(v == (16, 0) || v == (-16, 0), "sideways, twice as strong: {v:?}");
 }
 
 #[test]
-fn propose_offers_into_matter_too() {
-    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
-    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
-    assert!(out.offers[2], "water offers to water: the target decides");
-}
-
-#[test]
-fn propose_never_to_bedrock_which_exerts_nothing() {
+fn propose_velocity_that_hits_bedrock_turns_to_the_smallest_turn_that_is_not() {
     let mut seen = [State::BEDROCK; MAX_SLOTS];
     seen[1] = State::AIR;
     let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (0, 8), "bedrock below exerts nothing");
-    assert!(!out.offers[2], "not into the bedrock its velocity points at");
-    assert!(out.offers[1], "the smallest turn that is not bedrock");
+    assert!(out.offers[1], "the only neighbor that is not bedrock");
+    assert_eq!(out.matter.velocity, (7, -4), "turned that way, its size kept");
 }
 
 #[test]
 fn propose_waits_while_its_last_offer_is_unanswered() {
-    let out = update(offering(water((8, 0), 1), 1), State::AIR, [State::AIR; MAX_SLOTS]);
+    let out = update(offering(water((7, 4), 1), 2), State::AIR, [State::AIR; MAX_SLOTS]);
     assert!(!out.offering());
     assert_eq!(out.matter.id, 1, "still holds its matter");
 }
@@ -337,55 +324,58 @@ fn propose_waits_while_its_last_offer_is_unanswered() {
 #[test]
 fn evaluate_air_accepts_one_proposal_by_priority_and_rejects_the_rest() {
     let mut seen = [State::AIR; MAX_SLOTS];
-    seen[2] = offering(water((0, -8), 1), 0); // from below, heading straight here
-    seen[1] = offering(water((-6, -6), 2), 3); // from the right, heading here at a slant
+    seen[3] = offering(water((0, -8), 1), 0); // from below, heading straight here
+    seen[2] = offering(water((-4, -6), 2), 5); // from down-right, heading here at a slant
     let out = update(State::AIR, State::AIR, seen);
-    assert_eq!(out.verdicts[2], Verdict::Accept);
-    assert_eq!(out.verdicts[1], Verdict::Reject);
+    assert_eq!(out.verdicts[3], Verdict::Accept);
+    assert_eq!(out.verdicts[2], Verdict::Reject);
     assert_eq!(out.matter.id, 1, "acceptance is receipt");
+    assert!(out.matter.velocity.1 < 0, "with its energy: still heading up");
 }
 
 #[test]
 fn evaluate_a_full_cell_rejects_every_proposal() {
     let mut seen = [State::AIR; MAX_SLOTS];
-    seen[2] = offering(water((0, -8), 2), 0);
+    seen[3] = offering(water((0, -8), 2), 0);
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.verdicts[2], Verdict::Reject);
+    assert_eq!(out.verdicts[3], Verdict::Reject);
     assert_eq!(out.matter.id, 1);
 }
 
 #[test]
-fn resolve_an_accepted_giver_becomes_air_and_has_room_in_the_same_update() {
+fn resolve_an_accepted_giver_holds_nothing_and_takes_matter_in_the_same_update() {
     let mut seen = [State::AIR; MAX_SLOTS];
-    seen[1].verdicts[3] = Verdict::Accept; // the right neighbor took this cell's matter
-    seen[1].matter = water((8, 0), 1);
-    seen[2] = offering(water((0, -8), 2), 0); // and the one below offers its own
-    let out = update(State::holding(water((8, 0), 1)), offering(water((8, 0), 1), 1), seen);
-    assert_eq!(out.matter.id, 2, "gave its matter away and took the next");
-    assert_eq!(out.verdicts[2], Verdict::Accept);
+    seen[2].verdicts[5] = Verdict::Accept; // the down-right neighbor took this cell's matter
+    seen[2].matter = water((7, 4), 1);
+    seen[3] = offering(water((0, -8), 2), 0); // and the one below offers its own
+    let out = update(State::holding(water((7, 4), 1)), offering(water((7, 4), 1), 2), seen);
+    assert_eq!(out.matter.id, 2, "gave its matter away and took the next: never published empty");
+    assert_eq!(out.verdicts[3], Verdict::Accept);
 }
 
 #[test]
-fn resolve_a_rejected_giver_keeps_its_matter_and_offers_again() {
-    let mut seen = [State::AIR; MAX_SLOTS];
-    seen[1].verdicts[3] = Verdict::Reject;
-    let out = update(State::holding(water((8, 0), 1)), offering(water((8, 0), 1), 1), seen);
-    assert_eq!(out.matter.id, 1);
-    assert!(out.offering(), "it offers again");
+fn resolve_a_rejected_giver_keeps_its_matter_and_energy_and_offers_again() {
+    let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    seen[2].verdicts[5] = Verdict::Reject;
+    let out = update(State::holding(water((7, 4), 1)), offering(water((7, 4), 1), 2), seen);
+    assert_eq!(out.matter, water((7, 4), 1));
+    assert!(out.offers[2], "it offers again");
 }
 
 #[test]
 #[ignore]
 fn trace_ring_velocities() {
-    let (mut w, order) = ring(Shape::Square, Start::Flowing);
-    for _ in 0..256 {
+    let (mut w, order) = ring(Shape::Hex, Start::Flowing);
+    for _ in 0..144 {
         let row: Vec<String> = order
             .iter()
             .map(|&i| {
                 let c = w.cell(i);
                 let m = w.owned(i);
-                if m.is_air() {
-                    format!("{:?}:.", w.xy(i))
+                if c.matter.is_air() {
+                    format!("{:?}:AIR", w.xy(i))
+                } else if m.is_air() {
+                    format!("{:?}:.{:?}{}", w.xy(i), c.matter.velocity, if c.offering() { "*" } else { "" })
                 } else {
                     format!("{:?}:{:?}{}", w.xy(i), c.matter.velocity, if c.offering() { "*" } else { "" })
                 }
