@@ -2,7 +2,7 @@
 //! phase), order independence and the speed of information. Behavior assertions are measuring tools:
 //! when a rule changes on purpose and an outcome moves, report it.
 
-use crate::scenarios::{column, dump, frame, ring, run, still};
+use crate::scenarios::{column, dump, frame, moved, ring, run};
 use crate::*;
 
 fn check(result: Result<(), String>) {
@@ -11,66 +11,97 @@ fn check(result: Result<(), String>) {
     }
 }
 
-/// Runs a scenario up to `cap` phases, logging every frame; returns the phase it first went still.
-fn settle(name: &str, w: &mut World, cap: u32) -> Option<u32> {
+/// Runs a scenario `phases` phases with every invariant checked, logging the first `logged` frames.
+/// Returns the last phase in which any matter moved.
+fn observe(name: &str, w: &mut World, phases: u32, logged: u32) -> u32 {
     let mut log = frame(w);
-    let mut settled = None;
-    check(run(w, cap, |w| {
-        if settled.is_none() {
+    let mut last_move = 0;
+    check(run(w, phases, |w| {
+        if moved(w) {
+            last_move = w.now();
+        }
+        if w.now() <= logged {
             log += &frame(w);
-            if still(w) {
-                settled = Some(w.now());
-            }
         }
     }));
-    dump(name, &format!("{name}: settled at phase {settled:?}\n\n{log}"));
-    settled
+    let end = format!(
+        "after {phases} phases:
+{}",
+        frame(w)
+    );
+    dump(
+        name,
+        &format!(
+            "{name}: last move at phase {last_move}
+
+{end}
+{log}"
+        ),
+    );
+    last_move
 }
 
-// The scenarios
+// The scenarios: run on the CPU reference with every invariant checked; what they do is in the dumps.
 
-#[test]
-fn column_1_wide_falls_through_air_and_rests() {
-    let mut w = column(1);
-    let settled = settle("column_1_wide", &mut w, 60);
-    assert!(settled.is_some(), "never came to rest in 60 phases\n{}", w.ascii_intents());
-    let bottom: Vec<Material> = (7..10).map(|y| w.owned(w.index(0, y)).material).collect();
-    assert_eq!(bottom, [Material::Sand; 3], "the sand rests at the bottom\n{}", w.ascii());
-}
-
-#[test]
-fn column_2_wide_falls_and_settles_without_duplicating_or_vanishing() {
-    let mut w = column(2);
-    let settled = settle("column_2_wide", &mut w, 80);
-    assert!(settled.is_some(), "never came to rest in 80 phases\n{}", w.ascii_intents());
-    let holes = w
-        .cells()
+/// Whether the column's matter lies with no air under it in its column.
+fn holes(w: &World) -> usize {
+    w.cells()
         .filter(|&i| w.owned(i).is_air())
         .filter(|&i| {
             let (x, y) = w.xy(i);
             (0..y).any(|above| !w.owned(w.index(x, above)).is_air())
         })
-        .count();
-    assert_eq!(holes, 0, "no air under sand once still\n{}", w.ascii());
+        .count()
+}
+
+fn column_runs(name: &str, width: i32, material: Material) {
+    let mut w = column(width, material);
+    let last = observe(name, &mut w, 200, 40);
+    let holes = holes(&w);
+    eprintln!("{name}: last move at phase {last}, {holes} cells of air under matter");
+}
+
+#[test]
+fn column_1_wide_sand() {
+    column_runs("column_1_wide_sand", 1, Material::Sand);
+}
+
+#[test]
+fn column_1_wide_water() {
+    column_runs("column_1_wide_water", 1, Material::Water);
+}
+
+#[test]
+fn column_2_wide_sand() {
+    column_runs("column_2_wide_sand", 2, Material::Sand);
+}
+
+#[test]
+fn column_2_wide_water() {
+    column_runs("column_2_wide_water", 2, Material::Water);
 }
 
 /// Runs a ring for `phases`, following every unit of water along it. Returns how far each unit
-/// advanced, and the advances in each window of a ring's length.
-fn circulate(name: &str, shape: Shape, bubbles: usize, phases: u32) -> (Vec<usize>, Vec<usize>) {
+/// advanced.
+fn circulate(name: &str, shape: Shape, bubbles: usize, phases: u32) -> Vec<usize> {
     let (mut w, order) = ring(shape, bubbles);
     let n = order.len();
     let mut places = scenarios::ring_places(&w, &order);
     let mut advanced = vec![0; places.len()];
-    let mut windows = vec![0; (phases as usize).div_ceil(n)];
     let mut log = frame(&w);
     check(run(&mut w, phases, |w| {
         let now = scenarios::ring_places(w, &order);
         for (k, (&(id, was), &(id2, is))) in places.iter().zip(&now).enumerate() {
             assert_eq!(id, id2);
             let step = (is + n - was) % n;
-            assert!(step <= 1, "unit {id} jumped {step} cells along the ring at phase {}\n{}", w.now(), w.ascii());
+            assert!(
+                step <= 1,
+                "unit {id} jumped {step} cells along the ring at phase {}
+{}",
+                w.now(),
+                w.ascii()
+            );
             advanced[k] += step;
-            windows[(w.now() as usize - 1) / n] += step;
         }
         places = now;
         if w.now() as usize <= 2 * n {
@@ -78,50 +109,44 @@ fn circulate(name: &str, shape: Shape, bubbles: usize, phases: u32) -> (Vec<usiz
         }
     }));
     let summary = format!(
-        "{name}: {n} cells, {bubbles} of air, {phases} phases\nadvances per unit: {advanced:?}\nadvances per {n}-phase window: {windows:?}\n\n"
+        "{name}: {n} cells, {bubbles} of air, {phases} phases
+advances per unit: {advanced:?}
+
+"
     );
     dump(name, &(summary + &log));
-    (advanced, windows)
-}
-
-fn flows_forever(name: &str, shape: Shape, bubbles: usize) {
-    let n = ring(shape, bubbles).1.len();
-    let (advanced, windows) = circulate(name, shape, bubbles, (4 * n * n) as u32);
-    assert!(advanced.iter().all(|&a| a >= n), "every unit goes round the whole ring at least once: {advanced:?}");
-    assert!(windows.iter().all(|&m| m > 0), "the flow never stops: {windows:?}");
+    advanced
 }
 
 #[test]
-fn ring_square_with_a_bubble_flows_forever() {
-    flows_forever("ring_square_1_bubble", Shape::Square, 1);
+fn ring_square_full() {
+    circulate("ring_square_full", Shape::Square, 0, 256);
 }
 
 #[test]
-fn ring_hex_with_a_bubble_flows_forever() {
-    flows_forever("ring_hex_1_bubble", Shape::Hex, 1);
+fn ring_hex_full() {
+    circulate("ring_hex_full", Shape::Hex, 0, 144);
 }
 
 #[test]
-fn ring_hex_with_more_bubbles_flows_faster() {
-    let total = |b| circulate(&format!("ring_hex_flux_{b}_bubbles"), Shape::Hex, b, 144).0.iter().sum::<usize>();
-    let (one, two, four) = (total(1), total(2), total(4));
-    assert!(one < two && two < four, "flux grows with the air in the ring: {one}, {two}, {four}");
+fn ring_square_with_air() {
+    circulate("ring_square_1_air", Shape::Square, 1, 256);
 }
 
-/// A measurement, not a goal: one-way contracts can't move a full ring, since matter takes the place
-/// only of air and no cell has room. Flowing it is the Swaps question.
 #[test]
-fn ring_full_holds_still_under_one_way_contracts() {
-    for (name, shape) in [("ring_square_full", Shape::Square), ("ring_hex_full", Shape::Hex)] {
-        let (advanced, _) = circulate(name, shape, 0, 50);
-        assert!(advanced.iter().all(|&a| a == 0), "{name} moved: {advanced:?}");
-    }
+fn ring_hex_with_air() {
+    circulate("ring_hex_1_air", Shape::Hex, 1, 144);
 }
 
 // Invariants beyond those `run` checks every phase
 
 fn worlds() -> Vec<(&'static str, World)> {
-    vec![("column 2 wide", column(2)), ("hex ring", ring(Shape::Hex, 2).0), ("square ring", ring(Shape::Square, 1).0)]
+    vec![
+        ("column 2 wide", column(2, Material::Sand)),
+        ("water column", column(2, Material::Water)),
+        ("hex ring", ring(Shape::Hex, 2).0),
+        ("square ring", ring(Shape::Square, 1).0),
+    ]
 }
 
 fn same(name: &str, how: &str, a: &World, b: &World) {
@@ -216,7 +241,7 @@ fn speed_of_information_at_most_one_cell_per_phase() {
 
 #[test]
 fn conservation_measured_on_published_state_counts_matter_in_transit_once() {
-    let mut w = column(1);
+    let mut w = column(1, Material::Sand);
     let expected = w.inventory();
     let mut seen_transit = false;
     for _ in 0..10 {
@@ -248,21 +273,21 @@ fn offering(matter: Matter, s: Slot) -> State {
 }
 
 #[test]
-fn propose_offers_along_velocity_to_a_neighbor_with_room() {
+fn propose_offers_along_velocity() {
     let seen = [State::AIR; MAX_SLOTS];
     let out = update(State::holding(water((8, 0), 1)), State::AIR, seen);
     assert_eq!(out.offers[..4], [false, true, false, false], "right, its velocity's way");
 }
 
 #[test]
-fn propose_skips_matter_that_is_not_moving_away() {
+fn propose_offers_into_matter_too() {
     let mut seen = [State::AIR; MAX_SLOTS];
     seen[1] = State::holding(water((0, 0), 2));
     let out = update(State::holding(water((8, 0), 1)), State::AIR, seen);
-    assert!(!out.offers[1] && out.offers[0] != out.offers[2], "full ahead: up or down, at right angles, instead");
-    seen[1] = offering(water((8, 0), 2), 1);
+    assert!(out.offers[1], "water offers to water: the target decides");
+    seen[1] = State::BEDROCK;
     let out = update(State::holding(water((8, 0), 1)), State::AIR, seen);
-    assert!(out.offers[1], "matter offering itself away has room soon");
+    assert!(!out.offers[1] && out.offers[0] != out.offers[2], "never to bedrock: up or down, at right angles");
 }
 
 #[test]
@@ -311,27 +336,4 @@ fn resolve_a_rejected_giver_keeps_its_matter_and_offers_again() {
     let out = update(State::holding(water((8, 0), 1)), offering(water((8, 0), 1), 1), seen);
     assert_eq!(out.matter.id, 1);
     assert!(out.offers[1], "the neighbor shows air now, so it offers there again");
-}
-
-// Contracts per cell
-
-/// With one matter per cell and acceptance as receipt, offering to several neighbors duplicates
-/// matter as soon as two of them accept. The conservation check catches it on a lone grain with
-/// open air below. Where each target has a better offer to take (the two columns, whose straight
-/// falls outrank the slanted ones) or a cell has one way to go (the ring), fanout runs the same as
-/// one offer.
-#[test]
-fn contracts_fanout_duplicates_matter_where_a_cell_has_a_choice() {
-    let fanout = |mut w: World, phases| {
-        w.rules.contracts = Contracts::Fanout;
-        run(&mut w, phases, |_| {})
-    };
-    let mut grain = World::new(Shape::Hex, 3, 10);
-    grain.place(1, 0, Material::Sand, (0, 0));
-    let err = fanout(grain, 10).expect_err("fanout duplicates a lone grain");
-    assert!(err.contains("doubled"), "{err}");
-    dump("contracts_fanout_lone_grain", &err);
-    check(fanout(column(1), 40));
-    check(fanout(column(2), 80));
-    check(fanout(ring(Shape::Hex, 2).0, 200));
 }

@@ -11,8 +11,9 @@
 //! neighbors' published state at its own phase, under local phase synchronization ([`World::update`]),
 //! so a lattice of independently timed cells behaves exactly like a synchronous one.
 //!
-//! The rules are stupidly simple on purpose: matter passes along by one-way contracts, with no
-//! swaps or two-way terms, and nothing takes energy away.
+//! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
+//! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
+//! There are no swaps or two-way terms, and nothing takes energy away.
 
 pub mod debug;
 pub mod scenarios;
@@ -182,7 +183,8 @@ pub enum Verdict {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct State {
     pub matter: Matter,
-    /// The proposals made at this phase, by slot: an offer of this cell's matter to that neighbor.
+    /// The proposals made at this phase, by slot: an offer of this cell's matter to that neighbor. A
+    /// cell holds one matter, so it offers at most once: its offers never add up to more than it has.
     pub offers: [bool; MAX_SLOTS],
     /// This phase's verdicts on the proposals the neighbors published last phase, by slot.
     pub verdicts: [Verdict; MAX_SLOTS],
@@ -201,6 +203,10 @@ impl State {
         self.offers.contains(&true)
     }
 
+    pub fn offer(&self) -> Option<Slot> {
+        self.offers.iter().position(|&o| o)
+    }
+
     pub fn accepted(&self) -> Option<Slot> {
         self.verdicts.iter().position(|&v| v == Verdict::Accept)
     }
@@ -208,35 +214,48 @@ impl State {
 
 // Rules
 
-/// How many contracts a cell takes part in at once: the open question of contracts per cell.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Contracts {
-    /// One offer out and one acceptance in.
-    Single,
-    /// An offer to every qualifying neighbor at once; still one acceptance in, since a cell holds
-    /// one matter. An experiment: with acceptance as receipt it duplicates matter.
-    Fanout,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rules {
-    /// Velocity induced per phase per unit of density, downward, in eighths of a cell.
+    /// Velocity induced per phase per unit of density, downward, in eighths of a cell. The
+    /// neighborhood's nudge is proportional to it too.
     pub gravity: i32,
     /// The most speed matter carries.
     pub top_speed: i32,
-    pub contracts: Contracts,
 }
 
 impl Default for Rules {
     fn default() -> Rules {
-        Rules { gravity: 1, top_speed: 64, contracts: Contracts::Single }
+        Rules { gravity: 1, top_speed: 64 }
     }
 }
 
-/// Whether a neighbor may have room by the time it answers a proposal: it holds air, or it is
-/// offering its own matter away. Matter takes the place only of air.
-fn room(n: State) -> bool {
-    n.matter.material != Material::Bedrock && (n.matter.is_air() || n.offering())
+const SALT_SIDE: u32 = 0x30;
+
+/// The material reactions, which set the velocity. Density against gravity induces it downward.
+/// Density against the neighborhood nudges it sideways, perpendicular to gravity, toward the lighter
+/// side: a nudge if the cell is denser than the lightest of its lower neighbors, a strong one if it
+/// is lighter than the densest of its upper neighbors.
+fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
+    let (g, d) = (rules.gravity, matter.material.density());
+    let (mut vx, mut vy) = matter.velocity;
+    vy += g * d;
+    let slots = 0..shape.slots();
+    let density = |s: Slot| seen[s].matter.material.density();
+    let lower = slots.clone().filter(|&s| shape.dir(s).1 > 0).map(density).min().unwrap_or(d);
+    let upper = slots.clone().filter(|&s| shape.dir(s).1 < 0).map(density).max().unwrap_or(d);
+    let weight = |sign: i32| slots.clone().filter(|&s| shape.dir(s).0 * sign > 0).map(density).sum::<i32>();
+    let side = match weight(-1).cmp(&weight(1)) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Greater => 1,
+        std::cmp::Ordering::Equal => [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize],
+    };
+    if d > lower {
+        vx += side * g * (d - lower);
+    } else if d < upper {
+        vx += side * 2 * g * (upper - d);
+    }
+    let v = speed((vx, vy));
+    if v > rules.top_speed { (vx * rules.top_speed / v, vy * rules.top_speed / v) } else { (vx, vy) }
 }
 
 /// One cell's update, from phase `p` to `p + 1`: its next published state, from what it published at
@@ -253,16 +272,15 @@ pub fn next(
     let slots = 0..shape.slots();
     let mut matter = me.matter;
 
-    // Resolve: the proposals this cell published last phase, on the verdicts its targets publish now.
+    // Resolve: the proposal this cell published last phase, on the verdict its target publishes now.
     // An acceptance is receipt, so the matter is the target's already, and this cell is air.
-    let gave = slots.clone().any(|s| kept.offers[s] && seen[s].verdicts[shape.back(s)] == Verdict::Accept);
-    if gave {
+    if kept.offer().is_some_and(|s| seen[s].verdicts[shape.back(s)] == Verdict::Accept) {
         matter = Matter::AIR;
     }
 
     // Evaluate: every proposal to this cell, all together, by priority (how squarely the giver's
-    // velocity points here), then randomly. Only air has room, so it accepts at most one, and writes
-    // itself holding it, its velocity turned along the way it came.
+    // velocity points here), then randomly. A cell holding air has room for one, and writes itself
+    // holding it, its velocity turned along the way it came; a cell holding matter has none.
     let proposals = || slots.clone().filter(|&s| seen[s].offers[shape.back(s)]);
     let chosen = if matter.is_air() {
         let priority = |s: Slot| dot(seen[s].matter.velocity, shape.dir(shape.back(s)));
@@ -281,25 +299,17 @@ pub fn next(
         matter = Matter { velocity: (dx * v / 8, dy * v / 8), ..giver };
     }
 
-    // Propose: density against gravity induces velocity, and matter offers itself the way its velocity
-    // points, to a neighbor with room, unless its last offer is still unanswered.
+    // Propose: the material reactions set the velocity, and matter offers itself to the neighbor its
+    // velocity points at most squarely (bedrock aside), unless its last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
-        let (vx, vy) = (matter.velocity.0, matter.velocity.1 + rules.gravity * matter.material.density());
-        let v = speed((vx, vy));
-        matter.velocity =
-            if v > rules.top_speed { (vx * rules.top_speed / v, vy * rules.top_speed / v) } else { (vx, vy) };
+        matter.velocity = react(shape, rules, at, matter, seen);
         let v = matter.velocity;
         if !me.offering() && v != (0, 0) {
-            let candidates = slots.clone().filter(|&s| dot(v, shape.dir(s)) >= 0 && room(seen[s]));
-            let candidates = candidates.map(|s| (s, dot(v, shape.dir(s))));
-            match rules.contracts {
-                Contracts::Single => {
-                    if let Some(s) = best(candidates, at, SALT_OFFER) {
-                        offers[s] = true;
-                    }
-                }
-                Contracts::Fanout => candidates.for_each(|(s, _)| offers[s] = true),
+            let along = |s: Slot| dot(v, shape.dir(s));
+            let candidates = slots.clone().filter(|&s| along(s) >= 0 && seen[s].matter.material != Material::Bedrock);
+            if let Some(s) = best(candidates.map(|s| (s, along(s))), at, SALT_OFFER) {
+                offers[s] = true;
             }
         }
     }
@@ -524,6 +534,9 @@ impl World {
             let fail =
                 |why: &str| Err(format!("{:?} at phase {}: {why}\n{}", self.xy(i), self.now(), self.ascii_intents()));
             let (now, was) = (self.cell(i), self.kept(i));
+            if now.offers.iter().filter(|&&o| o).count() > 1 {
+                return fail("more offers than the one matter it holds");
+            }
             if now.offering() && (now.matter.is_air() || was.offering()) {
                 return fail("an offer of matter it doesn't hold, or whose last offer is unanswered");
             }

@@ -3,13 +3,13 @@
 
 use crate::{Material, Shape, World};
 
-/// A column 10 high and `width` wide on the hex lattice, its top three rows sand, air below.
+/// A column 10 high and `width` wide on the hex lattice, its top three rows `material`, air below.
 /// Beyond the edge is bedrock.
-pub fn column(width: i32) -> World {
+pub fn column(width: i32, material: Material) -> World {
     let mut w = World::new(Shape::Hex, width, 10);
     for y in 0..3 {
         for x in 0..width {
-            w.place(x, y, Material::Sand, (0, 0));
+            w.place(x, y, material, (0, 0));
         }
     }
     w
@@ -80,12 +80,10 @@ pub fn run(world: &mut World, phases: u32, mut each: impl FnMut(&World)) -> Resu
     Ok(())
 }
 
-/// Whether nothing is happening: no proposal or verdict published anywhere.
-pub fn still(world: &World) -> bool {
-    world.cells().all(|i| {
-        let s = world.cell(i);
-        !s.offering() && s.accepted().is_none() && s.verdicts.iter().all(|&v| v == crate::Verdict::None)
-    })
+/// Whether any matter moved this phase: an acceptance published anywhere. Matter at rest may still
+/// be offering and being refused.
+pub fn moved(world: &World) -> bool {
+    world.cells().any(|i| world.cell(i).accepted().is_some())
 }
 
 /// Where each unit of matter on a ring is, by its place along the ring, sorted by id.
@@ -112,8 +110,10 @@ pub fn dump(name: &str, text: &str) {
 pub fn frame(world: &World) -> String {
     let moves = world.cells().filter(|&i| world.cell(i).accepted().is_some()).count();
     let offers = world.cells().filter(|&i| world.cell(i).offering()).count();
+    let rejected: usize =
+        world.cells().map(|i| world.cell(i).verdicts.iter().filter(|&&v| v == crate::Verdict::Reject).count()).sum();
     format!(
-        "phase {}: {offers} offers, {moves} accepted, {} in transit (shown twice)\n{}",
+        "phase {}: {offers} offers, {moves} accepted, {rejected} rejected, {} in transit (shown twice)\n{}",
         world.now(),
         world.in_transit(),
         world.ascii_intents()
