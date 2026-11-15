@@ -14,8 +14,8 @@
 //! The rules are stupidly simple on purpose. Matter offers itself the way its velocity points, to
 //! whatever neighbor is there; the target accepts if, after resolving its own offer, it holds air.
 //! There are no swaps or two-way terms. Velocity is carried with the matter but never accumulates:
-//! gravity sets its size, and the neighborhood its direction. Matter at rest flows toward lighter
-//! matter beside it (a vacuum); moving matter keeps its direction.
+//! gravity sets its size, and density against the neighborhood turns it. The lattice has no down;
+//! the only downward bias is that comparison, against the contents directly below and above.
 
 pub mod debug;
 pub mod scenarios;
@@ -231,21 +231,34 @@ impl Default for Rules {
 
 const SALT_SIDE: u32 = 0x30;
 
-/// Velocity: its size is density times gravity; its direction comes from the neighborhood. Moving matter keeps its
-/// direction; matter at rest flows toward its lightest neighbor lighter than itself, if any.
-fn flow(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
-    let size = rules.gravity * matter.material.density();
-    let scale = |v: Vector| (v.0 * size / speed(v), v.1 * size / speed(v));
-    if matter.velocity != (0, 0) {
-        return scale(matter.velocity);
+/// Velocity, from the material reactions. Density against gravity sets its size: density times
+/// gravity. Density against the neighborhood turns it: denser than the contents directly below, a
+/// nudge perpendicular to that, sideways; lighter than the contents directly above, a strong nudge
+/// the same way; else nothing. Bedrock exerts nothing. The nudge goes the way the velocity already
+/// leans (the smaller turn), or either way at random. Velocity is carried, so matter with none and no
+/// nudge stays at rest.
+fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
+    let (g, d) = (rules.gravity, matter.material.density());
+    let vertical = |down: bool| (0..shape.slots()).find(|&s| shape.dir(s).0 == 0 && (shape.dir(s).1 > 0) == down);
+    let contents =
+        |s: Option<Slot>| s.map(|s| seen[s].matter.material).filter(|&m| m != Material::Bedrock).map(Material::density);
+    let (below, above) = (contents(vertical(true)), contents(vertical(false)));
+    let nudge = match (below, above) {
+        (Some(b), _) if d > b => g * (d - b),
+        (_, Some(a)) if d < a => 2 * g * (a - d),
+        _ => 0,
+    };
+    let v = matter.velocity;
+    let side = match v.0.signum() {
+        0 => [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize],
+        lean => lean,
+    };
+    let raw = (v.0 + side * nudge, v.1);
+    if raw == (0, 0) {
+        return (0, 0);
     }
-    let density = |s: Slot| seen[s].matter.material.density();
-    let lighter = (0..shape.slots())
-        .filter(|&s| seen[s].matter.material != Material::Bedrock && density(s) < matter.material.density());
-    match best(lighter.map(|s| (s, -density(s))), at, SALT_SIDE) {
-        Some(s) => scale(shape.dir(s)),
-        None => (0, 0),
-    }
+    let (size, len) = (g * d, speed(raw));
+    (raw.0 * size / len, raw.1 * size / len)
 }
 
 /// One cell's update, from phase `p` to `p + 1`: its next published state, from what it published at
@@ -295,7 +308,7 @@ pub fn next(
     // last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
-        matter.velocity = flow(shape, rules, at, matter, seen);
+        matter.velocity = react(shape, rules, at, matter, seen);
         let v = matter.velocity;
         if !me.offering() && v != (0, 0) {
             let along = |s: Slot| dot(v, shape.dir(s));

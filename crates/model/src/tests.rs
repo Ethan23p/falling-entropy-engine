@@ -283,20 +283,32 @@ fn propose_moving_matter_keeps_its_direction_and_takes_its_size_from_density() {
 }
 
 #[test]
-fn propose_matter_at_rest_flows_toward_a_lighter_neighbor() {
+fn propose_at_rest_with_nothing_lighter_below_or_heavier_above_stays_at_rest() {
     let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    seen[1] = State::AIR;
     seen[3] = State::AIR;
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (-8, 0), "toward the vacuum on the left; gravity sets only the size");
-    assert!(out.offers[3]);
+    assert_eq!(out.matter.velocity, (0, 0), "air beside exerts nothing; the comparison is below and above");
+    assert!(!out.offering());
 }
 
 #[test]
-fn propose_matter_at_rest_among_its_own_kind_stays_at_rest() {
-    let seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+fn propose_dense_over_lighter_is_nudged_perpendicular() {
+    let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    seen[2] = State::AIR;
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (0, 0), "no lighter neighbor, no direction; the lattice has no down");
-    assert!(!out.offering());
+    assert_eq!(out.matter.velocity.1, 0, "perpendicular to the density below: sideways");
+    assert_eq!(out.matter.velocity.0.abs(), 8, "size from density against gravity");
+    assert!(out.offers[1] || out.offers[3]);
+}
+
+#[test]
+fn propose_light_under_heavier_is_nudged_strongly_perpendicular() {
+    let mut seen = [State::holding(water((0, 0), 2)); MAX_SLOTS];
+    seen[0] = State::holding(Matter { material: Material::Sand, velocity: (0, 0), id: 3 });
+    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
+    let v = out.matter.velocity;
+    assert!(v.0.abs() > v.1, "the strong nudge outweighs the carried velocity: {v:?}");
 }
 
 #[test]
@@ -311,6 +323,7 @@ fn propose_never_to_bedrock_which_exerts_nothing() {
     let mut seen = [State::BEDROCK; MAX_SLOTS];
     seen[1] = State::AIR;
     let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
+    assert_eq!(out.matter.velocity, (0, 8), "bedrock below exerts nothing");
     assert!(!out.offers[2], "not into the bedrock its velocity points at");
     assert!(out.offers[1], "the smallest turn that is not bedrock");
 }
