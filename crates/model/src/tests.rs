@@ -373,3 +373,25 @@ fn resolve_a_rejected_giver_keeps_its_matter_and_offers_again() {
     assert_eq!(out.matter.id, 1);
     assert!(out.offering(), "it offers again");
 }
+
+#[test]
+#[ignore]
+fn trace_ring_velocities() {
+    let (mut w, order) = ring(Shape::Square, Start::Flowing);
+    for _ in 0..256 {
+        let row: Vec<String> = order
+            .iter()
+            .map(|&i| {
+                let c = w.cell(i);
+                let m = w.owned(i);
+                if m.is_air() {
+                    format!("{:?}:.", w.xy(i))
+                } else {
+                    format!("{:?}:{:?}{}", w.xy(i), c.matter.velocity, if c.offering() { "*" } else { "" })
+                }
+            })
+            .collect();
+        eprintln!("p{} {}", w.now(), row.join(" "));
+        w.step();
+    }
+}

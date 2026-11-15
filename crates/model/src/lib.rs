@@ -257,8 +257,18 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
     if raw == (0, 0) {
         return (0, 0);
     }
-    let (size, len) = (g * d, speed(raw));
-    (raw.0 * size / len, raw.1 * size / len)
+    resize(raw, g * d)
+}
+
+/// `v` at a new size, its angle kept: each component rounds to nearest, and one that is not zero
+/// never rounds to zero, so a velocity angled up stays angled up.
+fn resize(v: Vector, size: i32) -> Vector {
+    let len = speed(v).max(1);
+    let one = |c: i32| {
+        let r = (2 * c * size + c.signum() * len) / (2 * len);
+        if r == 0 { c.signum() } else { r }
+    };
+    (one(v.0), one(v.1))
 }
 
 /// One cell's update, from phase `p` to `p + 1`: its next published state, from what it published at
@@ -295,12 +305,10 @@ pub fn next(
     for s in proposals() {
         verdicts[s] = if Some(s) == chosen { Verdict::Accept } else { Verdict::Reject };
     }
-    // The matter received keeps its velocity's size and points the way it just moved.
+    // The matter received points the way it just moved, at the size gravity gives it.
     if let Some(s) = chosen {
         matter = seen[s].matter;
-        let (moved, size) = (shape.dir(shape.back(s)), speed(matter.velocity));
-        let len = speed(moved);
-        matter.velocity = (moved.0 * size / len, moved.1 * size / len);
+        matter.velocity = resize(shape.dir(shape.back(s)), rules.gravity * matter.material.density());
     }
 
     // Propose: gravity sets the velocity's size and the neighborhood its direction, and matter offers itself to a neighbor, bedrock
