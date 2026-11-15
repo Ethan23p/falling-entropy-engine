@@ -221,11 +221,14 @@ pub struct Rules {
     /// Gravity's pull, in eighths of a cell per unit of density: matter's velocity downward is its
     /// density times this. The neighborhood's nudge is proportional to it too.
     pub gravity: i32,
+    /// Whether gravity pulls down. Without it, as in a ring laid flat, gravity only sets velocity's
+    /// size, and the one thing that sets a direction is lighter matter (air, a vacuum) beside it.
+    pub down: bool,
 }
 
 impl Default for Rules {
     fn default() -> Rules {
-        Rules { gravity: 8 }
+        Rules { gravity: 8, down: true }
     }
 }
 
@@ -271,6 +274,23 @@ fn steer(carried: Vector, reaction: Vector) -> Vector {
         return reaction;
     }
     (raw.0 * size / len, raw.1 * size / len)
+}
+
+/// Velocity without a downward pull: its size is density times gravity. Moving matter keeps its
+/// direction; matter at rest flows toward its lightest neighbor lighter than itself, if any.
+fn flow(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen: &[State; MAX_SLOTS]) -> Vector {
+    let size = rules.gravity * matter.material.density();
+    let scale = |v: Vector| (v.0 * size / speed(v), v.1 * size / speed(v));
+    if matter.velocity != (0, 0) {
+        return scale(matter.velocity);
+    }
+    let density = |s: Slot| seen[s].matter.material.density();
+    let lighter = (0..shape.slots())
+        .filter(|&s| seen[s].matter.material != Material::Bedrock && density(s) < matter.material.density());
+    match best(lighter.map(|s| (s, -density(s))), at, SALT_SIDE) {
+        Some(s) => scale(shape.dir(s)),
+        None => (0, 0),
+    }
 }
 
 /// One cell's update, from phase `p` to `p + 1`: its next published state, from what it published at
@@ -320,7 +340,11 @@ pub fn next(
     // last offer is still unanswered.
     let mut offers = [false; MAX_SLOTS];
     if !matter.is_air() {
-        matter.velocity = steer(matter.velocity, react(shape, rules, at, matter, seen));
+        matter.velocity = if rules.down {
+            steer(matter.velocity, react(shape, rules, at, matter, seen))
+        } else {
+            flow(shape, rules, at, matter, seen)
+        };
         let v = matter.velocity;
         if !me.offering() && v != (0, 0) {
             let along = |s: Slot| dot(v, shape.dir(s));
@@ -447,6 +471,12 @@ impl World {
         self.states[i] = [State::holding(Matter { material, velocity, id }); 2];
     }
 
+    /// Sets a cell's published state and the one before it, before the world runs: for starting a
+    /// scenario mid-contract.
+    pub fn seed(&mut self, i: usize, now: State, kept: State) {
+        self.states[i] = [now, kept];
+    }
+
     /// One cell's update. It advances a phase once every neighbor has matched or passed its phase,
     /// reading each neighbor's state of its own phase's parity, and overwrites the older of its own
     /// two states, which no neighbor reads any more. Returns whether it advanced.
@@ -510,7 +540,9 @@ impl World {
 
     /// The matter the cell owns, in published state: a giver whose proposal was accepted owns air.
     pub fn owned(&self, i: usize) -> Matter {
-        if !self.is_bedrock(i) && self.given(i) { Matter::AIR } else { self.cell(i).matter }
+        // A giver whose offer was accepted owns nothing, unless it accepted matter in the same update.
+        let received = self.cell(i).accepted().is_some();
+        if !self.is_bedrock(i) && self.given(i) && !received { Matter::AIR } else { self.cell(i).matter }
     }
 
     /// The ids of every unit of matter the world owns, sorted, as published. Conservation is this

@@ -15,21 +15,23 @@ pub fn column(width: i32, material: Material) -> World {
     w
 }
 
-/// Where a ring's one cell of air starts, if it has one.
+/// How a ring starts.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Air {
-    None,
-    /// The ring's top-left cell.
-    Top,
-    /// The ring's lowest cell.
-    Bottom,
+pub enum Start {
+    /// Full of water at rest.
+    Full,
+    /// Full of water at rest but for one cell, the ring's top-left, that has just given its water to
+    /// the cell ahead (clockwise) and, in the same update, received the water from the cell behind,
+    /// which now gives it up. Both moved units point the way they moved.
+    Flowing,
 }
 
-/// A ring one cell wide with bedrock inside and out, standing upright under gravity, full of water
-/// but for its cell of `air`. Returns the world and the ring's cells in order, clockwise from the
+/// A ring one cell wide with bedrock inside and out, laid flat (no downward pull), full of water and
+/// started as `start` says. Returns the world and the ring's cells in order, clockwise from the
 /// top-left.
-pub fn ring(shape: Shape, air: Air) -> (World, Vec<usize>) {
+pub fn ring(shape: Shape, start: Start) -> (World, Vec<usize>) {
     let mut w = World::new(shape, 7, 7);
+    w.rules.down = false;
     let on_ring = |x: i32, y: i32| match shape {
         // The border of the middle 5x5: 16 cells, with four square corners.
         Shape::Square => (1..=5).contains(&x) && (1..=5).contains(&y) && (x == 1 || x == 5 || y == 1 || y == 5),
@@ -38,8 +40,8 @@ pub fn ring(shape: Shape, air: Air) -> (World, Vec<usize>) {
     };
     let cells: Vec<usize> = (0..w.len()).filter(|&i| on_ring(w.xy(i).0, w.xy(i).1)).collect();
     // Walk the ring clockwise from its top-left cell, heading right.
-    let start = *cells.iter().min_by_key(|&&i| (w.xy(i).1, w.xy(i).0)).unwrap();
-    let mut order = vec![start];
+    let start_cell = *cells.iter().min_by_key(|&&i| (w.xy(i).1, w.xy(i).0)).unwrap();
+    let mut order = vec![start_cell];
     while order.len() < cells.len() {
         let here = *order.last().unwrap();
         let next = (0..shape.slots())
@@ -53,15 +55,31 @@ pub fn ring(shape: Shape, air: Air) -> (World, Vec<usize>) {
         let (x, y) = w.xy(i);
         w.place(x, y, Material::Bedrock, (0, 0));
     }
-    let lowest = *order.iter().max_by_key(|&&i| (2 * w.xy(i).1 + (w.xy(i).0 & 1), -w.xy(i).0)).unwrap();
-    let air = match air {
-        Air::None => None,
-        Air::Top => Some(start),
-        Air::Bottom => Some(lowest),
-    };
     for &i in &order {
         let (x, y) = w.xy(i);
-        w.place(x, y, if Some(i) == air { Material::Air } else { Material::Water }, (0, 0));
+        w.place(x, y, Material::Water, (0, 0));
+    }
+    if start == Start::Flowing {
+        let n = order.len();
+        let (behind, here, ahead) = (order[n - 1], order[0], order[1]);
+        let slot =
+            |w: &World, from: usize, to: usize| (0..shape.slots()).find(|&s| w.neighbor(from, s) == Some(to)).unwrap();
+        let moved = |w: &World, from: usize, to: usize| crate::Matter {
+            velocity: shape.dir(slot(w, from, to)),
+            ..w.cell(from).matter
+        };
+        let (behind_now, mut behind_kept) = (w.cell(behind), w.cell(behind));
+        // Behind: published an offer to here last phase, which here accepts now; it resolves to air.
+        behind_kept.offers[slot(&w, behind, here)] = true;
+        // Here: in the same update it read that ahead had accepted its water, became air, and
+        // accepted behind's.
+        let mut here_now = crate::State::holding(moved(&w, behind, here));
+        here_now.verdicts[slot(&w, here, behind)] = crate::Verdict::Accept;
+        // Ahead: holds here's water, received the update before.
+        let ahead_now = crate::State::holding(moved(&w, here, ahead));
+        w.seed(behind, behind_now, behind_kept);
+        w.seed(here, here_now, here_now);
+        w.seed(ahead, ahead_now, ahead_now);
     }
     (w, order)
 }

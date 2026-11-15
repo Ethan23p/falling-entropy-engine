@@ -2,7 +2,7 @@
 //! phase), order independence and the speed of information. Behavior assertions are measuring tools:
 //! when a rule changes on purpose and an outcome moves, report it.
 
-use crate::scenarios::{Air, column, dump, frame, moved, ring, run};
+use crate::scenarios::{Start, column, dump, frame, moved, ring, run};
 use crate::*;
 
 fn check(result: Result<(), String>) {
@@ -83,8 +83,8 @@ fn column_2_wide_water() {
 
 /// Runs a ring for `phases`, following every unit of water along it. Returns each unit's moves
 /// clockwise and counterclockwise.
-fn circulate(name: &str, shape: Shape, air: Air, phases: u32) -> Vec<(usize, usize)> {
-    let (mut w, order) = ring(shape, air);
+fn circulate(name: &str, shape: Shape, start: Start, phases: u32) -> Vec<(usize, usize)> {
+    let (mut w, order) = ring(shape, start);
     let n = order.len();
     let mut places = scenarios::ring_places(&w, &order);
     let mut advanced = vec![(0, 0); places.len()];
@@ -113,7 +113,7 @@ fn circulate(name: &str, shape: Shape, air: Air, phases: u32) -> Vec<(usize, usi
         }
     }));
     let summary = format!(
-        "{name}: {n} cells, air {air:?}, {phases} phases
+        "{name}: {n} cells, {start:?}, {phases} phases
 moves per unit (clockwise, counterclockwise): {advanced:?}
 
 "
@@ -124,32 +124,22 @@ moves per unit (clockwise, counterclockwise): {advanced:?}
 
 #[test]
 fn ring_square_full() {
-    circulate("ring_square_full", Shape::Square, Air::None, 256);
+    circulate("ring_square_full", Shape::Square, Start::Full, 256);
 }
 
 #[test]
 fn ring_hex_full() {
-    circulate("ring_hex_full", Shape::Hex, Air::None, 144);
+    circulate("ring_hex_full", Shape::Hex, Start::Full, 144);
 }
 
 #[test]
-fn ring_square_air_at_top() {
-    circulate("ring_square_air_top", Shape::Square, Air::Top, 256);
+fn ring_square_flowing() {
+    circulate("ring_square_flowing", Shape::Square, Start::Flowing, 256);
 }
 
 #[test]
-fn ring_square_air_at_bottom() {
-    circulate("ring_square_air_bottom", Shape::Square, Air::Bottom, 256);
-}
-
-#[test]
-fn ring_hex_air_at_top() {
-    circulate("ring_hex_air_top", Shape::Hex, Air::Top, 144);
-}
-
-#[test]
-fn ring_hex_air_at_bottom() {
-    circulate("ring_hex_air_bottom", Shape::Hex, Air::Bottom, 144);
+fn ring_hex_flowing() {
+    circulate("ring_hex_flowing", Shape::Hex, Start::Flowing, 144);
 }
 
 // Invariants beyond those `run` checks every phase
@@ -158,8 +148,8 @@ fn worlds() -> Vec<(&'static str, World)> {
     vec![
         ("column 2 wide", column(2, Material::Sand)),
         ("water column", column(2, Material::Water)),
-        ("hex ring", ring(Shape::Hex, Air::Top).0),
-        ("square ring", ring(Shape::Square, Air::Bottom).0),
+        ("hex ring", ring(Shape::Hex, Start::Flowing).0),
+        ("square ring", ring(Shape::Square, Start::Flowing).0),
     ]
 }
 
