@@ -315,8 +315,18 @@ fn propose_never_to_bedrock_which_exerts_nothing() {
     let mut seen = [State::AIR; MAX_SLOTS];
     seen[2] = State::BEDROCK;
     let out = update(State::holding(water((0, 0), 1)), State::AIR, seen);
-    assert_eq!(out.matter.velocity, (0, 8), "no nudge from the bedrock below");
-    assert!(!out.offers[2] && out.offers[1] != out.offers[3], "the smallest turn: left or right");
+    assert_eq!(out.matter.velocity.1, 8, "gravity sets the size; bedrock below exerts nothing");
+    assert_eq!(out.matter.velocity.0.abs(), 8, "the air beside is lighter: a nudge toward it");
+    assert!(!out.offers[2] && out.offers[1] != out.offers[3], "left or right, never into bedrock");
+}
+
+#[test]
+fn propose_water_beside_air_is_nudged_toward_it() {
+    let mut seen = [State::BEDROCK; MAX_SLOTS];
+    seen[2] = State::holding(water((0, 0), 2));
+    seen[3] = State::AIR;
+    let out = update(State::holding(water((0, 8), 1)), State::AIR, seen);
+    assert!(out.matter.velocity.0 < 0, "toward the lighter air on the left: {:?}", out.matter.velocity);
 }
 
 #[test]

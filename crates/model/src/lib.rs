@@ -243,8 +243,10 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
     let density = |s: Slot| seen[s].matter.material.density();
     let lower = slots().filter(|&s| shape.dir(s).1 > 0).map(density).min().unwrap_or(d);
     let upper = slots().filter(|&s| shape.dir(s).1 < 0).map(density).max().unwrap_or(d);
-    let weight = |sign: i32| slots().filter(|&s| shape.dir(s).0 * sign > 0).map(density).sum::<i32>();
-    let side = match weight(-1).cmp(&weight(1)) {
+    // Each side's lightest neighbor; a side with only bedrock has none to move toward.
+    let lightest = |sign: i32| slots().filter(|&s| shape.dir(s).0 * sign > 0).map(density).min().unwrap_or(i32::MAX);
+    let beside = lightest(-1).min(lightest(1));
+    let side = match lightest(-1).cmp(&lightest(1)) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Greater => 1,
         std::cmp::Ordering::Equal => [-1, 1][(hash(at.0, at.1, at.2, SALT_SIDE) & 1) as usize],
@@ -253,6 +255,8 @@ fn react(shape: Shape, rules: &Rules, at: (i32, i32, u32), matter: Matter, seen:
         vx += side * g * (d - lower);
     } else if d < upper {
         vx += side * 2 * g * (upper - d);
+    } else if d > beside {
+        vx += side * g * (d - beside);
     }
     (vx, vy)
 }
