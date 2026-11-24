@@ -2,36 +2,32 @@
 
 Falling Sand Engine is v2 of Ethan's falling-sand game, in Rust + WebGPU. It grows one mechanic (or feature: the same thing) at a time on cellular-automaton primitives, from a minimal base toward field-mediated matter. It will be served by Ethan's games platform, [contra-ethos-games](https://github.com/Ethan23p/contra-ethos-games), but lives in its own repo. v1 is [Phosphor-Sand](https://github.com/Ethan23p/Phosphor-Sand) (plain JS + WGSL, at sand.contra-ethos.com); borrow its dynamics freely.
 
-This file is for orientation and standing rules. It summarizes the **Process** section of the Falling Sand Engine tab, which wins if they disagree, and adds the commands and architecture. It holds no status or history: what is being built lives in the doc, and what has been built lives in the git log.
+This file is for orientation and standing rules: how we work, the commands and the architecture. It holds no status or history: what is being built lives in the design doc, and what has been built lives in the git log.
 
 ## Sources of truth
 
-1. **The doc is the authority:** the Claude Doc [Understanding Cellular Automata](https://claude.ai/artifact/QzVdJFygvriiRbGSj1xnau), read and written with the Claude Docs connector (load the docs skill first). Its tabs:
-   - **Falling Sand Engine** is the backbone. If the code were lost, it should be enough to rebuild it.
-     - **Process**: how we work. Read it when a process question comes up; this file is its summary.
-     - **Scope**: every feature we're working toward, the current version and its open questions, and the Focus list: the next few, in order. A feature gets a version only once that version is being built.
-     - **Primitives**: the model (entities, capabilities, policies) and the standard vocabulary. Names in the code and tests come from here: cell, matter, material, density, energy, velocity, phase, published state, contract; the update's stages Read, Resolve, Evaluate, Propose, Publish; Execute, Accept, Reject.
-     - If the code and the tab disagree, the tab wins. If the tab is silent, ask Ethan, then update the tab.
-   - **Engine v00 (archive)**: the engine before the v01 rebuild (per-material rules: fall, step, trade, flow). History, not current.
-   - **Abstractions v1**, **CA Reference v5** and **Field-mediated matter**: reference, design options, trade-offs and the MPM notes. Read them when a mechanic touches them, not every session.
+1. **The design doc is the authority:** Ethan's Logseq page [[Falling Entropy Engine]] (graph Logseq-DB-Aurelius). It describes the whole self-consistent system Ethan is aiming for; each version builds a piece of it, as its Policies section says. Read it through a Remote Control session on Ethan's PC (folder `C:\Caesar-General`) with the logseq-interface skill, pulling the full depth (`--level 50`). Its sections:
+   - **Scope**: the Entities, Capabilities and Policies, including what constrains the current version. Names in the code and tests come from here: lattice, cell, particle, material, mass, velocity, phase, published state, contract (offer, request), selection, physics distribution; the update's stages read, resolve, evaluate, evolve, publish, propose.
+   - **Technical Specification**: the toy cases.
+   - If the code and the design doc disagree, the doc wins. If it is silent, ask Ethan.
 2. **The git log is the progress tracker.** Each commit is prefixed with the version it belongs to, e.g. `v01.00: a column of sand falls and rests`.
+3. **The Claude Doc** [Understanding Cellular Automata](https://claude.ai/artifact/QzVdJFygvriiRbGSj1xnau) is for collaboration and coordination, not a source of truth: notes that don't fit here, batches of questions for Ethan. Use it with the Claude Docs connector (load the docs skill first).
 
 ## Roles and decisions
 
-Ethan is the designer and owns the doc. Claude is the engineer and owns the code, tooling and verification.
+Ethan is the designer and owns the design doc. Claude is the engineer and owns the code, tooling and verification.
 
-- **Every design decision is open until settled in chat with Ethan.** That covers physics, materials, rules, geometry, conservation and feel. Bring them as two or three concrete options with a recommendation.
-- **A settled decision goes into the tab in the same turn.** Usually that means a primitive; if it can't be settled yet, an open question.
-- **New primitives are added freely** when the implementation needs one. **Settled primitives change with care,** in chat first.
-- **Behavior is found, not prescribed.** Set up the causes (material reactions, contracts) and watch what emerges; intuitions about outcomes are often wrong, and the sim is the judge.
-- Engineering calls (crate layout, encodings, test harness, tooling) are Claude's. Record one in the tab only if it shapes a primitive. A refinement within a settled design can be built first and raised in the wrap-up.
+- **Every design decision is open until settled with Ethan.** That covers physics, materials, rules, geometry, conservation and feel. Bring them as two or three concrete options with a recommendation.
+- **Implement the design doc as written.** Add no constraint it doesn't state, and don't flag implementation details (how a stage does its job) as gaps: they are Claude's to fill.
+- **Behavior is found, not prescribed.** Set up the causes (material properties, contracts, the physics distribution) and watch what emerges; intuitions about outcomes are often wrong, and the sim is the judge.
+- Engineering calls (crate layout, encodings, test harness, tooling) are Claude's. A refinement within a settled design can be built first and raised in the wrap-up.
 
 ## Workflow
 
-Each version targets one mechanic, the next on the Focus list:
+Each version targets one mechanic:
 
-1. Spec the mechanic in the tab: its primitives, plus open questions resolved with Ethan. A new model is proved on tiny scenarios (a column, a ring) before it carries the game.
-2. Write failing tests, as many per primitive as it needs, named after the primitive or policy they pin (`propose_*`, `evaluate_*`, `resolve_*`, `conservation_*`). Invariant tests (conservation, order independence, the speed of information) are hard checks and always stay. Behavior tests are measuring tools: when a mechanic changes on purpose and an outcome moves, report it rather than treat it as a bug. When a version replaces a primitive, the tests that pinned the old one are rewritten or retired, not satisfied. Conservation is measured on published state; a cell's state mid-update can look duplicated while a self-write is in transit.
+1. Read what the design doc says about the mechanic, and resolve open questions with Ethan. A new model is proved on tiny scenarios (the doc's toy cases) before it carries the game.
+2. Write failing tests, as many per entity, capability or policy as it needs, named after what they pin (`propose_*`, `evaluate_*`, `resolve_*`, `conservation_*`). Invariant tests (conservation, order independence, the speed of information) are hard checks and always stay. Behavior tests are measuring tools: when a mechanic changes on purpose and an outcome moves, report it rather than treat it as a bug. When a version replaces a piece of the model, the tests that pinned the old one are rewritten or retired, not satisfied. Conservation is measured on published state; a cell's state mid-update can look duplicated while a self-write is in transit.
 3. Implement until they pass.
 4. Make it playable on desktop and phone, even before it's fun. Ethan plays on a phone.
 5. Commit, with the version prefix.
@@ -41,7 +37,7 @@ Adversarial review comes in batches, not every version: a subagent tries to brea
 Keep it low-key:
 - Tests must stay fast. Compile times must stay low: few dependencies, and the sim crate has none.
 - The foundations (synchrony, contracts, rendering) get the most care; everything builds on them.
-- Context is a budget. Read only what the step needs; don't re-read the whole doc each session. Start each version in a fresh session, and send wide reading, searching and surveys to subagents, which return only their conclusions.
+- Context is a budget. Read only what the step needs; don't re-read the whole design doc each session. Start each version in a fresh session, and send wide reading, searching and surveys to subagents, which return only their conclusions.
 - Write code with the file-editing tools, not shell heredocs: the Bash tool's heredocs break on apostrophes.
 - Keep this file accurate when a rule or a command changes. Never put status here.
 
