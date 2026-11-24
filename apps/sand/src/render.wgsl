@@ -15,35 +15,19 @@ struct View {
 
 // A word: the state (bits 0-18) and its phase (bits 19-31); see sim.wgsl.
 const STATE_BITS: u32 = 19u;
-const STATE_MASK: u32 = 0x7ffffu;
 const PHASE_MASK: u32 = 0x1fffu;
 
 // The index of cell i's current word, of the two it keeps: the one tagged with the later phase.
-// The other is its older word, holding the offer it made the phase before.
 fn current(i: i32) -> i32 {
     let even = cells[2 * i] >> STATE_BITS;
     let odd = cells[2 * i + 1] >> STATE_BITS;
     return select(2 * i + 1, 2 * i, ((even - odd) & PHASE_MASK) == 1u);
 }
 
-fn neighbor(x: i32, y: i32, d: u32) -> vec2<i32> {
-    let odd = x & 1;
-    switch d {
-        case 0u: { return vec2(x, y - 1); }
-        case 1u: { return vec2(x + 1, y - 1 + odd); }
-        case 2u: { return vec2(x + 1, y + odd); }
-        case 3u: { return vec2(x, y + 1); }
-        case 4u: { return vec2(x - 1, y + odd); }
-        default: { return vec2(x - 1, y - 1 + odd); }
-    }
-}
-
 // Outside the lattice is bedrock, so it draws as bedrock.
 const BEDROCK: vec3<f32> = vec3(0.031, 0.035, 0.047);
 const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
 const SAND: vec3<f32> = vec3(0.871, 0.718, 0.431);
-const WATER: vec3<f32> = vec3(0.220, 0.470, 0.800);
-const SLATE: vec3<f32> = vec3(0.310, 0.345, 0.400);
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -60,20 +44,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(BEDROCK, 1.0);
     }
-    // `World::looks`: a giver whose offer a neighbor's acceptance names draws as what the terms of
-    // that offer, kept back in its older word, send back: air, or the water coming back from a trade.
-    let word = current(y * view.width + x);
-    var material = min(cells[word] & 7u, 4u);
-    for (var d = 0u; d < 6u; d++) {
-        let n = neighbor(x, y, d);
-        if n.x < 0 || n.y < 0 || n.x >= view.width || n.y >= view.height {
-            continue;
-        }
-        let t = cells[current(n.y * view.width + n.x)] & STATE_MASK;
-        if ((t >> 7u) & 7u) == (d + 3u) % 6u + 1u {
-            material = select(0u, 2u, ((cells[word ^ 1] >> 6u) & 1u) == 1u);
-        }
-    }
-    var colors = array<vec3<f32>, 5>(AIR, SAND, WATER, SLATE, BEDROCK);
+    let material = min(cells[current(y * view.width + x)] & 3u, 2u);
+    var colors = array<vec3<f32>, 3>(AIR, SAND, BEDROCK);
     return vec4(colors[material], 1.0);
 }

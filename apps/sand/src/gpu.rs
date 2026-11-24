@@ -111,7 +111,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 48);
+        let params = uniform("params", 16);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -149,24 +149,9 @@ impl Lattice {
         encoder: &mut wgpu::CommandEncoder,
         stamps: &[Stamp],
         phases: u32,
-        rules: &sim::Rules,
     ) {
         let stamps = &stamps[stamps.len().saturating_sub(MAX_STAMPS)..];
-        let [s0, s1, s2, s3] = rules.start;
-        let params = [
-            self.width as u32,
-            self.height as u32,
-            stamps.len() as u32,
-            rules.splash as u32,
-            s0,
-            s1,
-            s2,
-            s3,
-            rules.gravity,
-            rules.friction,
-            0,
-            0,
-        ];
+        let params = [self.width as u32, self.height as u32, stamps.len() as u32, 0];
         queue.write_buffer(&self.params, 0, &words(&params));
         let (gx, gy) = self.groups();
         if !stamps.is_empty() {
@@ -320,18 +305,13 @@ mod tests {
 
         let (w, h) = (61, 47);
         let mut world = World::new(w, h);
-        for x in 5..40 {
-            world.paint(x, 30 - x / 3, Material::Slate);
-        }
         for x in 8..13 {
             world.paint(x, 10, Material::Bedrock);
         }
         for y in 0..h * 2 / 3 {
             for x in 0..w {
-                match sim::hash(x, y, 0, 77) % 6 {
-                    0 | 1 => world.paint(x, y, Material::Sand),
-                    2 | 3 => world.paint(x, y, Material::Water),
-                    _ => {}
+                if sim::hash(x, y, 0, 77).is_multiple_of(3) {
+                    world.paint(x, y, Material::Sand);
                 }
             }
         }
@@ -346,7 +326,7 @@ mod tests {
         let mut phase = 0;
         for chunk in [1, 1, 1, 7, 40, 150] {
             let mut encoder = device.create_command_encoder(&Default::default());
-            lattice.simulate(&queue, &pipelines, &mut encoder, &[], chunk, &world.rules);
+            lattice.simulate(&queue, &pipelines, &mut encoder, &[], chunk);
             encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 8) as u64);
             queue.submit([encoder.finish()]);
             for _ in 0..chunk {
@@ -371,14 +351,13 @@ mod tests {
             }
         }
 
-        // The brush, in the middle of motion: matter only into air, erasing anywhere, in order.
+        // The brush: matter only into air, erasing anything but bedrock, in order.
         let stamps = [
-            Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Slate },
+            Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Sand },
             Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },
             Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Air },
-            Stamp { x: 45.0, y: 20.0, radius: 5.5, material: Material::Slate },
             Stamp { x: 10.0, y: 10.0, radius: 3.5, material: Material::Air },
-            Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Water },
+            Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Sand },
         ];
         for s in &stamps {
             world.stamp(s.x, s.y, s.radius, s.material);
@@ -387,7 +366,7 @@ mod tests {
             world.step();
         }
         let mut encoder = device.create_command_encoder(&Default::default());
-        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30, &world.rules);
+        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30);
         encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 8) as u64);
         queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
