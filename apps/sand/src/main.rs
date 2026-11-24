@@ -1,6 +1,6 @@
-//! Falling Sand Engine, v00.05: sand, water, slate and air, with velocity. The lattice lives on
-//! the GPU; the brush paints sand, water or slate into air and erases; the config panel tunes the
-//! rates, the feel of motion, the cell size and the brush, and picks a preset scene.
+//! Falling Sand Engine, v01.00 scaffolding: air, sand and bedrock on a synchronized hex lattice, no
+//! rules yet. The lattice lives on the GPU; the brush paints sand into air and erases; the config
+//! panel tunes the rates, the cell size and the brush, and picks a preset scene.
 //!
 //! Native: `cargo run -p sand [-- --scene NAME]`. Web: `trunk serve` from this folder, with
 //! `?scene=NAME` to start in a scene. The harness: `cargo run -p sand -- strip|bench ...`.
@@ -15,7 +15,7 @@ use engine::glam::Vec2;
 use engine::{App, Frame, Gpu, Input, Phase, Schema, Shapes, Tunable, Tuner, wgpu};
 use gpu::{Lattice, Pipelines, Readback, Stamp};
 use scenes::Scene;
-use sim::{Material, Rules, World};
+use sim::{Material, World};
 
 static SCENE_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(scenes::names);
 
@@ -23,10 +23,6 @@ static SCENE_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(scenes::names);
 pub struct Config {
     pub sim_rate: f32,
     pub max_phases: i32,
-    pub start: f32,
-    pub gravity: f32,
-    pub splash: i32,
-    pub friction: f32,
     pub cell_size: f32,
     pub scene: usize,
     pub brush_radius: f32,
@@ -35,27 +31,11 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            sim_rate: 240.0,
-            max_phases: 16,
-            start: Rules::START,
-            gravity: Rules::GRAVITY,
-            splash: Rules::SPLASH as i32,
-            friction: Rules::FRICTION,
-            cell_size: 4.0,
-            scene: 0,
-            brush_radius: 3.0,
-            tool: 0,
-        }
+        Self { sim_rate: 240.0, max_phases: 16, cell_size: 4.0, scene: 0, brush_radius: 3.0, tool: 0 }
     }
 }
 
 impl Config {
-    /// The feel of motion, as the sim takes it.
-    pub fn rules(&self) -> Rules {
-        Rules::new(self.start, self.gravity, self.splash.clamp(0, 3) as u8, self.friction)
-    }
-
     pub fn scene(&self) -> &'static Scene {
         &scenes::ALL[self.scene.min(scenes::ALL.len() - 1)]
     }
@@ -72,15 +52,10 @@ impl Tunable for Config {
             1..=64,
             |c| &mut c.max_phases,
         );
-        s.group("Motion")
-            .float("start", "Start", "chance/phase", 0.01..=1.0, 0.01, |c| &mut c.start)
-            .float("gravity", "Gravity", "chance/fall", 0.0..=1.0, 0.01, |c| &mut c.gravity)
-            .int("splash", "Splash", "speed kept", 0..=3, |c| &mut c.splash)
-            .float("friction", "Friction", "chance/step", 0.0..=1.0, 0.01, |c| &mut c.friction);
         s.group("Lattice")
             .float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size)
             .choice("scene", "Scene (rebuilds)", &SCENE_NAMES, |c| &mut c.scene);
-        s.group("Brush").choice("tool", "Tool", &["Sand", "Water", "Slate", "Erase"], |c| &mut c.tool).float(
+        s.group("Brush").choice("tool", "Tool", &["Sand", "Erase"], |c| &mut c.tool).float(
             "brush_radius",
             "Radius",
             "cells",
@@ -152,7 +127,7 @@ impl Game {
 
     fn stamp(&mut self, at: Vec2) {
         let c = &self.tuner.current;
-        let material = [Material::Sand, Material::Water, Material::Slate, Material::Air][c.tool.min(3)];
+        let material = [Material::Sand, Material::Air][c.tool.min(1)];
         self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, material });
     }
 
@@ -255,7 +230,7 @@ impl App for Game {
             radius: s.radius,
             material: s.material,
         }));
-        lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, phases, &self.tuner.current.rules());
+        lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, phases);
         self.stamps.clear();
         lattice.render(gpu.queue, pipelines, encoder, target, self.origin.into(), self.cell.into());
         self.read_scene(gpu, encoder);

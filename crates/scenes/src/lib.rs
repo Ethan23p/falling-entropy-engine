@@ -10,7 +10,7 @@ pub mod run;
 /// The sim rate, in phases per second, that scripts and measures are written for: the shipped one.
 pub const RATE: u32 = 240;
 
-use sim::{Dir, Material, World};
+use sim::{Material, World};
 
 /// One brush stamp, in cell units, as `World::stamp` takes it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,16 +60,8 @@ impl Scene {
 /// Every scene, in the order the game lists them. The first is the blank lattice.
 pub const ALL: &[Scene] = &[
     Scene { name: "empty", about: "a blank lattice", build: Build::Code(|_| {}), script: None },
-    Scene { name: "funnel", about: "sand and water into a slate funnel", build: Build::Code(funnel), script: None },
-    Scene { name: "dam", about: "a column of water lets go", build: Build::Code(dam), script: None },
+    Scene { name: "packed", about: "a lattice packed with sand and air", build: Build::Code(packed), script: None },
     Scene { name: "pour", about: "sand poured onto a floor", build: Build::Code(|_| {}), script: Some(pour) },
-    Scene {
-        name: "tap",
-        about: "water run down a ramp into a basin",
-        build: Build::Code(tap),
-        script: Some(tap_script),
-    },
-    Scene { name: "sink", about: "sand poured into a pool", build: Build::Code(sink), script: Some(sink_script) },
 ];
 
 pub fn find(name: &str) -> Option<&'static Scene> {
@@ -80,41 +72,14 @@ pub fn names() -> Vec<&'static str> {
     ALL.iter().map(|s| s.name).collect()
 }
 
-/// Paints slate from `(x, y)` stepping toward `d` while in bounds and `go` holds. Walking
-/// neighbors leaves no holes, which a drawn line would on this lattice.
-fn wall(world: &mut World, (mut x, mut y): (i32, i32), d: Dir, go: impl Fn(i32, i32) -> bool) {
-    while world.in_bounds(x, y) && go(x, y) {
-        world.paint(x, y, Material::Slate);
-        (x, y) = sim::neighbor(x, y, d);
-    }
-}
-
-/// Two slate ramps sloping in toward a gap, under a scattering of sand, a block of sand and a
-/// block of water.
-fn funnel(world: &mut World) {
+/// Every cell holds sand or air, hashed half and half: the first toy case.
+fn packed(world: &mut World) {
     let (w, h) = (world.width(), world.height());
-    for (start, d) in [(w / 2 + 3, Dir::UpRight), (w / 2 - 3, Dir::UpLeft)] {
-        wall(world, (start, h * 2 / 3), d, |x, _| (x - w / 2).abs() < w / 2 - 2);
-    }
-    for y in 0..h / 2 {
+    for y in 0..h {
         for x in 0..w {
-            let block = (w / 3..w / 2).contains(&x) && y < h / 4;
-            let pool = (w * 3 / 5..w * 4 / 5).contains(&x) && y < h / 3;
-            if pool {
-                world.paint(x, y, Material::Water);
-            } else if block || sim::hash(x, y, 0, 41).is_multiple_of(4) {
+            if sim::hash(x, y, 0, 41) & 1 == 1 {
                 world.paint(x, y, Material::Sand);
             }
-        }
-    }
-}
-
-/// Water filling the left quarter, free to spread across the floor.
-fn dam(world: &mut World) {
-    let (w, h) = (world.width(), world.height());
-    for y in h / 4..h {
-        for x in 0..w / 4 {
-            world.paint(x, y, Material::Water);
         }
     }
 }
@@ -126,46 +91,14 @@ fn pour(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
     }
 }
 
-/// A slate ramp falling from the upper left into a walled basin on the right.
-fn tap(world: &mut World) {
-    let (w, h) = (world.width(), world.height());
-    wall(world, (w / 12, h / 3), Dir::DownRight, |x, _| x < w / 2);
-    let floor = (w / 2, h - 1 - h / 10);
-    wall(world, floor, Dir::Up, |_, y| y > h / 2);
-    wall(world, (w / 2, h - 1), Dir::Up, |_, y| y > floor.1);
-    wall(world, (w - 1, h - 1), Dir::Up, |_, y| y > h / 2);
-}
-
-/// Water run onto the top of the ramp, 30 times a second for 15 s.
-fn tap_script(phase: u32, w: i32, h: i32, out: &mut Vec<Stamp>) {
-    if phase < 15 * RATE && phase.is_multiple_of(RATE / 30) {
-        out.push(Stamp { x: w as f32 / 12.0 + 2.0, y: h as f32 / 3.0 - 6.0, radius: 1.2, material: Material::Water });
-    }
-}
-
-/// A pool filling the bottom half.
-fn sink(world: &mut World) {
-    let (w, h) = (world.width(), world.height());
-    for y in h / 2..h {
-        for x in 0..w {
-            world.paint(x, y, Material::Water);
-        }
-    }
-}
-
-/// A trickle of sand into the middle of the pool, for 20 s.
-fn sink_script(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
-    pour(phase, w, 0, out);
-}
-
 /// A world's materials as text, so a scene painted in the game can be pasted back as a preset.
 ///
 /// ```text
 /// fse-scene 1
 /// size 120 80
-/// about two ramps and a pool
-/// 40.3#77.
-/// 12~2:
+/// about a pile on a ledge
+/// 40.3@77.
+/// 12:2.:
 /// ```
 ///
 /// After the header, one line per row, top first: runs of a count (omitted when 1) and a glyph
@@ -179,12 +112,13 @@ pub struct Painting {
 }
 
 const HEADER: &str = "fse-scene 1";
-const MATERIALS: [Material; 5] = [Material::Air, Material::Sand, Material::Water, Material::Slate, Material::Bedrock];
+const MATERIALS: [Material; 3] = [Material::Air, Material::Sand, Material::Bedrock];
 
 impl Painting {
     pub fn of(world: &World, about: &str) -> Painting {
         let (width, height) = (world.width(), world.height());
-        let cells = (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| world.looks(x, y)).collect();
+        let cells =
+            (0..height).flat_map(|y| (0..width).map(move |x| (x, y))).map(|(x, y)| world.material(x, y)).collect();
         Painting { width, height, about: about.trim().into(), cells }
     }
 
@@ -300,52 +234,26 @@ mod tests {
     }
 
     #[test]
-    fn contract_every_scene_keeps_the_rules_with_its_brush() {
-        // Every unit of matter has exactly one owner and no offer is made without its matter, after
-        // every step of every scene, scripted brush and all.
+    fn conservation_every_scene_keeps_its_matter_but_for_its_brush() {
         for scene in ALL {
             let mut run = run::Run::new(scene, 48, 36);
             for _ in 0..400 {
-                run.step();
-                if let Err(e) = run.world.audit() {
-                    panic!("{}: {e}", scene.name);
-                }
+                let before = run.world.count(Material::Sand);
+                let painted = run.step();
+                assert!(painted || run.world.count(Material::Sand) == before, "{}", scene.name);
             }
         }
     }
 
     #[test]
-    fn painting_keeps_water_in_flight() {
-        // Mid-trade, a grain's giver still shows the grain while the water is owed back to it by
-        // the terms: the painting draws that water, so none is lost.
-        let mut run = run::Run::new(find("sink").unwrap(), 40, 30);
-        let mut saw_trade = false;
-        for _ in 0..300 {
-            run.step();
-            let w = &run.world;
-            saw_trade |= (0..w.height()).any(|y| {
-                (0..w.width()).any(|x| {
-                    w.taker(x, y).is_some() && w.material(x, y) == Material::Sand && w.looks(x, y) == Material::Water
-                })
-            });
-            let painted = Painting::of(w, "");
-            let water = (0..w.height())
-                .flat_map(|y| (0..w.width()).map(move |x| (x, y)))
-                .filter(|&(x, y)| painted.material(x, y) == Material::Water)
-                .count();
-            assert_eq!(water, w.count(Material::Water));
-        }
-        assert!(saw_trade);
-    }
-
-    #[test]
     fn painting_round_trips_through_text() {
         let mut world = World::new(30, 20);
-        find("funnel").unwrap().build(&mut world);
+        find("packed").unwrap().build(&mut world);
+        world.paint(0, 19, Material::Air);
         world.paint(0, 19, Material::Bedrock);
-        let painting = Painting::of(&world, "  the funnel ");
+        let painting = Painting::of(&world, "  the packed lattice ");
         let text = painting.to_text();
-        assert!(text.starts_with("fse-scene 1\nsize 30 20\nabout the funnel\n"), "{text}");
+        assert!(text.starts_with("fse-scene 1\nsize 30 20\nabout the packed lattice\n"), "{text}");
         assert_eq!(Painting::parse(&text), Ok(painting.clone()));
 
         let mut again = World::new(30, 20);
@@ -359,13 +267,13 @@ mod tests {
 
     #[test]
     fn painting_scales_to_a_bigger_lattice() {
-        let text = "fse-scene 1\nsize 2 2\n:~\n#\n";
+        let text = "fse-scene 1\nsize 2 2\n:.\n@\n";
         let p = Painting::parse(text).unwrap();
         let mut world = World::new(4, 4);
         p.paint_into(&mut world);
         assert_eq!(world.material(0, 0), Material::Sand);
-        assert_eq!(world.material(3, 1), Material::Water);
-        assert_eq!(world.material(1, 3), Material::Slate);
+        assert_eq!(world.material(3, 1), Material::Air);
+        assert_eq!(world.material(1, 3), Material::Bedrock);
         assert_eq!(world.material(3, 3), Material::Air);
     }
 

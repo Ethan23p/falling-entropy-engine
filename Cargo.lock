@@ -619,6 +619,7 @@ dependencies = [
 [[package]]
 name = "engine"
 version = "0.1.0"
+source = "git+https://github.com/Ethan23p/contra-ethos-games?rev=48210d5ebfbec0c580bc53f90055a10c5f850188#48210d5ebfbec0c580bc53f90055a10c5f850188"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
@@ -1302,10 +1303,6 @@ dependencies = [
  "adler2",
  "simd-adler32",
 ]
-
-[[package]]
-name = "model"
-version = "0.0.1"
 
 [[package]]
 name = "moxcms"

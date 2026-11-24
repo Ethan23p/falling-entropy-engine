@@ -4,7 +4,7 @@
 //! renders chosen moments through the game's own render shader, and stacks them into a vertical
 //! strip under a text header: what to look at after a sim or render change.
 //!
-//! `bench` measures feel on the CPU reference (how fast water levels, how steep sand piles) and
+//! `bench` measures feel on the CPU reference (how steep sand piles, how fast it settles) and
 //! compares with the last run, so a change to a rule shows up as numbers.
 
 use std::path::{Path, PathBuf};
@@ -13,7 +13,6 @@ use engine::{Tuner, wgpu};
 use image::{Rgba, RgbaImage};
 use scenes::Scene;
 use scenes::run::{Run, Trigger, pile_angle};
-use sim::Material;
 
 use crate::Config;
 use crate::gpu::{Lattice, Pipelines};
@@ -24,8 +23,8 @@ usage:
       --note WORDS      a few words on what this run is for, shown in the header
       --at 0,1,3,8      capture at these times, in seconds (the default)
       --when TRIGGERS   also capture when each first holds, comma-separated:
-                        settled, level, or a metric test like moving<10, water>=500
-                        (metrics: sand, water, moving, still, level)
+                        settled, or a metric test like moving<10, sand>=500
+                        (metrics: sand, moving, still)
       --until SECONDS   run at most this long (default: the last --at, or 30 with --when)
       --set ID=VALUE    a config value for this run, as Copy values writes it (repeatable)
       --size WxH        lattice size in cells (default 160x100)
@@ -135,7 +134,6 @@ fn strip(args: &[String]) -> Result<(), String> {
 
     for &scene in &a.scenes {
         let mut run = Run::new(scene, a.size.0, a.size.1);
-        run.world.rules = tuner.current.rules();
         let mut times: Vec<(u32, f32)> = a.at.iter().map(|&t| ((t * rate).round() as u32, t)).collect();
         times.sort_by_key(|&(p, _)| p);
         let default_end = if a.when.is_empty() { 0.0 } else { 30.0 };
@@ -439,22 +437,6 @@ fn seconds_until(run: &mut Run, seconds: f64, done: impl Fn(&Run) -> bool) -> Op
 
 const CASES: &[Case] = &[
     Case {
-        // Water levels slowly; how far it has got by 30 s is the readable number.
-        name: "dam: surface spread at 30 s",
-        unit: "½c",
-        measure: || {
-            let mut run = run_of("dam");
-            seconds_until(&mut run, 30.0, |_| false);
-            run.metrics().level.map(f64::from)
-        },
-    },
-    Case {
-        // Restless drops skating on the surface keep water moving; spent speed lets it rest.
-        name: "dam: settles",
-        unit: "s",
-        measure: || seconds_until(&mut run_of("dam"), 60.0, |r| r.metrics().still >= scenes::RATE),
-    },
-    Case {
         name: "pour: pile angle",
         unit: "°",
         measure: || {
@@ -470,40 +452,6 @@ const CASES: &[Case] = &[
             let mut run = run_of("pour");
             seconds_until(&mut run, 20.0, |_| false);
             seconds_until(&mut run, 60.0, |r| r.metrics().still >= scenes::RATE)
-        },
-    },
-    Case {
-        name: "tap: water in the basin at 20 s",
-        unit: "%",
-        measure: || {
-            let mut run = run_of("tap");
-            seconds_until(&mut run, 20.0, |_| false);
-            let w = &run.world;
-            let total = w.count(Material::Water);
-            let basin = (w.width() / 2..w.width())
-                .flat_map(|x| (0..w.height()).map(move |y| (x, y)))
-                .filter(|&(x, y)| w.looks(x, y) == Material::Water)
-                .count();
-            (total > 0).then(|| 100.0 * basin as f64 / total as f64)
-        },
-    },
-    Case {
-        name: "sink: first grain reaches the floor",
-        unit: "s",
-        measure: || {
-            let mut run = run_of("sink");
-            let floor = SIZE.1 - 1;
-            seconds_until(&mut run, 30.0, |r| (0..SIZE.0).any(|x| r.world.looks(x, floor) == Material::Sand))
-        },
-    },
-    Case {
-        // Drops skate on the raised surface for a long while, so the pile is measured at a time.
-        name: "sink: pile angle under water at 40 s",
-        unit: "°",
-        measure: || {
-            let mut run = run_of("sink");
-            seconds_until(&mut run, 40.0, |_| false);
-            pile_angle(&run.world)
         },
     },
 ];

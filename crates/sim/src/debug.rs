@@ -2,79 +2,45 @@
 //! lattice is right there in the test output.
 //!
 //! Each cell is drawn as a brick two text lines tall, one character wide, and odd columns start
-//! a line lower, so the column-offset hex lattice keeps its true geometry: a level water surface
-//! reads level, and a diagonal reads as a staircase of half steps.
+//! a line lower, so the column-offset hex lattice keeps its true geometry: a level surface reads
+//! level, and a diagonal reads as a staircase of half steps.
 //!
-//! Glyphs: `.` air, `:` sand, `~` water, `#` slate, `@` bedrock. Cells are drawn as they own
-//! matter, so a giver whose offer was accepted draws as what its terms send back: air, or the water
-//! coming back from a trade. With intents (`ascii_intents`), the top line of a brick shows the way
-//! matter is moving, `↑ ↗ ↘ ↓ ↙ ↖`: out along its offer, else in along its acceptance.
+//! Glyphs: `.` air, `:` sand, `@` bedrock.
 //!
 //! ```text
 //!      012
-//!    0 : .        a 3x2 world: sand at (0, 0), water at (1, 0),
-//!      :~.        slate at (2, 1), air elsewhere
-//!    1 .~#
-//!      ..#
+//!    0 : .        a 3x2 world: sand at (0, 0) and (1, 0),
+//!      ::.        bedrock at (2, 1), air elsewhere
+//!    1 .:@
+//!      ..@
 //!       .
 //! ```
 
-use crate::{Dir, Material, Rules, State, World};
+use crate::{Material, State, World};
 
 /// The character a material draws as.
 pub fn glyph(material: Material) -> char {
     match material {
         Material::Air => '.',
         Material::Sand => ':',
-        Material::Water => '~',
-        Material::Slate => '#',
         Material::Bedrock => '@',
     }
 }
 
-/// An arrow pointing the way `d` goes.
-pub fn arrow(d: Dir) -> char {
-    match d {
-        Dir::Up => '↑',
-        Dir::UpRight => '↗',
-        Dir::DownRight => '↘',
-        Dir::Down => '↓',
-        Dir::DownLeft => '↙',
-        Dir::UpLeft => '↖',
-    }
-}
-
-/// The way matter is moving through a cell, if any: out along an offer, else in along an acceptance.
-pub fn motion(s: State) -> Option<Dir> {
-    s.offer.or(s.accept.map(Dir::opposite))
-}
-
 impl World {
-    /// Rebuilds a world from raw cell words, e.g. a GPU readback.
-    pub fn from_words(width: i32, height: i32, words: Vec<u32>) -> World {
-        assert_eq!(words.len(), 2 * (width * height) as usize, "{width}x{height} lattice, two words a cell");
-        World { width, height, cells: words, rules: Rules::default() }
-    }
-
     /// Materials only.
     pub fn ascii(&self) -> String {
-        self.ascii_with(|_, owns| (glyph(owns), glyph(owns)))
-    }
-
-    /// Materials, with the way matter is moving on the top line of each brick that has an intent.
-    pub fn ascii_intents(&self) -> String {
-        self.ascii_with(|s, owns| (motion(s).map_or(glyph(owns), arrow), glyph(owns)))
+        self.ascii_with(|s| (glyph(s.material), glyph(s.material)))
     }
 
     /// Draws each cell's brick with `cell`'s two characters, top line first, under a ruler of
-    /// column numbers (mod 10) and beside row numbers. `cell` gets what the cell publishes and what
-    /// it owns (`World::looks`).
-    pub fn ascii_with(&self, cell: impl Fn(State, Material) -> (char, char)) -> String {
-        let (w, h) = (self.width as usize, self.height as usize);
+    /// column numbers (mod 10) and beside row numbers. `cell` gets what the cell publishes.
+    pub fn ascii_with(&self, cell: impl Fn(State) -> (char, char)) -> String {
+        let (w, h) = (self.width() as usize, self.height() as usize);
         let mut lines = vec![vec![' '; w]; 2 * h + 1];
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let (top, bottom) = cell(self.cell(x, y), self.looks(x, y));
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let (top, bottom) = cell(self.cell(x, y));
                 let line = (2 * y + (x & 1)) as usize;
                 lines[line][x as usize] = top;
                 lines[line + 1][x as usize] = bottom;
@@ -93,33 +59,35 @@ impl World {
 }
 
 /// Where `got` differs from `want`: `None` when every word matches, else the first mismatch and
-/// both worlds with intents, the differing cells marked `X` in a third view.
+/// both worlds, the differing cells marked `X` in a third view.
 pub fn diff(want: &World, got: &World) -> Option<String> {
-    assert_eq!((want.width, want.height), (got.width, got.height), "same lattice size");
-    let differs: Vec<usize> = (0..(want.width * want.height) as usize)
-        .filter(|&i| want.cells[2 * i..2 * i + 2] != got.cells[2 * i..2 * i + 2])
-        .collect();
+    assert_eq!((want.width(), want.height()), (got.width(), got.height()), "same lattice size");
+    let (w, h) = (want.width(), want.height());
+    let differs: Vec<usize> =
+        (0..(w * h) as usize).filter(|&i| want.words()[2 * i..2 * i + 2] != got.words()[2 * i..2 * i + 2]).collect();
     let first = *differs.first()?;
-    let (x, y) = (first as i32 % want.width, first as i32 / want.width);
-    let mut marked = World::new(want.width, want.height);
+    let (x, y) = (first as i32 % w, first as i32 / w);
+    let mut marked = World::new(w, h);
     for &i in &differs {
-        marked.set(i as i32 % want.width, i as i32 / want.width, State::holding(Material::Sand));
+        marked.paint(i as i32 % w, i as i32 / w, Material::Sand);
     }
-    let marks = marked.ascii_with(|s, _| {
+    let marks = marked.ascii_with(|s| {
         let c = if s.material == Material::Sand { 'X' } else { '.' };
         (c, c)
     });
     Some(format!(
-        "{} cells differ, first at ({x}, {y}): want {:?}, got {:?}
+        "{} cells differ, first at ({x}, {y}): want {:?} at phase {}, got {:?} at phase {}
 want:
 {}got:
 {}differ:
 {}",
         differs.len(),
         want.cell(x, y),
+        want.phase(x, y),
         got.cell(x, y),
-        want.ascii_intents(),
-        got.ascii_intents(),
+        got.phase(x, y),
+        want.ascii(),
+        got.ascii(),
         marks
     ))
 }
@@ -132,28 +100,10 @@ mod tests {
     fn debug_ascii_draws_odd_columns_half_a_cell_lower() {
         let mut w = World::new(3, 2);
         w.paint(0, 0, Material::Sand);
-        w.paint(1, 0, Material::Water);
-        w.paint(2, 1, Material::Slate);
-        let want = "     012\n   0 : .\n     :~.\n   1 .~#\n     ..#\n      .\n";
-        assert_eq!(w.ascii(), want);
-    }
-
-    #[test]
-    fn debug_intents_show_offers_and_acceptances() {
-        let mut w = World::new(3, 3);
-        w.rules.start = [1 << 16; 4]; // falls at once
         w.paint(1, 0, Material::Sand);
-        w.step(); // the offer, drawn on the top line of (1, 0), which starts a line lower in an odd column
-        let view = w.ascii_intents();
-        assert!(
-            view.lines().nth(2).unwrap().contains('↓'),
-            "the giver offers
-{view}"
-        );
-        w.step(); // accepted: the receiver offers onward; the giver draws as the air it clears to
-        let view = w.ascii_intents();
-        assert_eq!(view.matches('↓').count(), 1, "{view}");
-        assert!(!view.lines().nth(2).unwrap().contains('↓') && !view.lines().nth(2).unwrap().contains(':'), "{view}");
+        w.paint(2, 1, Material::Bedrock);
+        let want = "     012\n   0 : .\n     ::.\n   1 .:@\n     ..@\n      .\n";
+        assert_eq!(w.ascii(), want);
     }
 
     #[test]
@@ -161,8 +111,8 @@ mod tests {
         let a = World::new(4, 4);
         assert_eq!(diff(&a, &a), None);
         let mut b = a.clone();
-        b.paint(2, 1, Material::Water);
-        b.paint(3, 3, Material::Water);
+        b.paint(2, 1, Material::Sand);
+        b.paint(3, 3, Material::Sand);
         let report = diff(&a, &b).expect("differs");
         assert!(report.starts_with("2 cells differ, first at (2, 1)"), "{report}");
     }
