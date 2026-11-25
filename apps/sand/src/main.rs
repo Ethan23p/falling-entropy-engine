@@ -305,6 +305,13 @@ impl App for Game {
                 ui.ctx().copy_text(text.clone());
                 self.copied = 60;
             }
+            // v1 is deployed beside the game, at /phosphor/ (see .github/workflows/pages.yml).
+            #[cfg(target_arch = "wasm32")]
+            if ui.button("Phosphor Sand").clicked()
+                && let Some(window) = web_sys::window()
+            {
+                let _ = window.location().set_href(PHOSPHOR_SAND);
+            }
         });
     }
 }
@@ -335,6 +342,10 @@ impl Game {
         self.frames_since_read = 0;
     }
 }
+
+/// Where the config panel's Phosphor Sand button goes: v1, deployed beside the game.
+#[cfg(target_arch = "wasm32")]
+const PHOSPHOR_SAND: &str = "phosphor/";
 
 /// The scene named in the page's `?scene=` query, if any.
 #[cfg(target_arch = "wasm32")]

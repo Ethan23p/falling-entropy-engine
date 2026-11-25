@@ -65,6 +65,7 @@ From the repo root:
 - Strips: `cargo run -p sand -- strip SCENE... [--note "a couple words"] [--at 0,1,3,8] [--when settled,moving<10] [--set ID=VALUE]` renders a vertical strip of frames, with a header and per-frame metrics, to `target/strips/<scene>.png` and `.txt`. `strip all` does every scene; `strip` alone prints the options. Look at one after any sim or render change.
 - Feel bench: `cargo run -p sand -- bench` measures feel (pile angle, settling) on the CPU reference and compares with the last run, saved in `target/bench.txt`. Run it before and after a change to a rule. It's an instrument, not a target: when a version changes the rules on purpose, report what moved and why, and let Ethan judge feel in play. Nothing is tuned back toward an earlier version's numbers.
 - Web: `trunk serve` from `apps/sand/` (http://127.0.0.1:8770); the `sand` entry in `.claude/launch.json` does the same for the in-app browser. A hidden browser pane throttles to a few frames per second, so judge speed only with the pane shown.
+- Deploy: every push to `main` runs `.github/workflows/pages.yml`, which builds the web app with Trunk and publishes it to GitHub Pages at sand.contra-ethos.com, with Phosphor Sand copied in at `/phosphor/` (the config panel links to it). Merging to `main` is deploying, so ask first.
 
 Running them, with contingencies:
 - Expect competent speeds: the sim tests take about a second and a warm build about 15. A test that waits on the world (settling, a scene reaching some state) caps its phases and fails with `world.ascii()` instead of hanging.

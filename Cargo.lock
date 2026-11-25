@@ -619,7 +619,7 @@ dependencies = [
 [[package]]
 name = "engine"
 version = "0.1.0"
-source = "git+https://github.com/Ethan23p/contra-ethos-games?rev=48210d5ebfbec0c580bc53f90055a10c5f850188#48210d5ebfbec0c580bc53f90055a10c5f850188"
+source = "git+https://github.com/Ethan23p/contra-ethos-games?rev=253a204425ab71da599e41a928c0494494897807#253a204425ab71da599e41a928c0494494897807"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
