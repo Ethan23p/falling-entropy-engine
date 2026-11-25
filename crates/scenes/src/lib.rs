@@ -61,6 +61,12 @@ impl Scene {
 pub const ALL: &[Scene] = &[
     Scene { name: "empty", about: "a blank lattice", build: Build::Code(|_| {}), script: None },
     Scene { name: "packed", about: "a lattice packed with sand and air", build: Build::Code(packed), script: None },
+    Scene {
+        name: "packed-vacuum",
+        about: "a lattice packed with sand and air and one cell of vacuum",
+        build: Build::Code(packed_vacuum),
+        script: None,
+    },
     Scene { name: "pour", about: "sand poured onto a floor", build: Build::Code(|_| {}), script: Some(pour) },
 ];
 
@@ -82,6 +88,13 @@ fn packed(world: &mut World) {
             }
         }
     }
+}
+
+/// The packed lattice with one cell of vacuum in the middle: the second toy case.
+fn packed_vacuum(world: &mut World) {
+    packed(world);
+    let (w, h) = (world.width(), world.height());
+    world.paint(w / 2, h / 2, Material::Vacuum);
 }
 
 /// A trickle of sand onto the middle of the floor, 20 grains a second for 20 s.
@@ -112,7 +125,7 @@ pub struct Painting {
 }
 
 const HEADER: &str = "fse-scene 1";
-const MATERIALS: [Material; 3] = [Material::Air, Material::Sand, Material::Bedrock];
+const MATERIALS: [Material; 4] = [Material::Air, Material::Sand, Material::Bedrock, Material::Vacuum];
 
 impl Painting {
     pub fn of(world: &World, about: &str) -> Painting {

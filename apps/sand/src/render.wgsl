@@ -29,6 +29,8 @@ fn current(i: i32) -> i32 {
 const BEDROCK: vec3<f32> = vec3(0.031, 0.035, 0.047);
 const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
 const SAND: vec3<f32> = vec3(0.871, 0.718, 0.431);
+// Vacuum: a deep violet, darker than air and distinct from bedrock.
+const VACUUM: vec3<f32> = vec3(0.098, 0.035, 0.157);
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -45,7 +47,7 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(BEDROCK, 1.0);
     }
-    let material = min(cells[current(y * view.width + x)] & 3u, 2u);
-    var colors = array<vec3<f32>, 3>(AIR, SAND, BEDROCK);
+    let material = cells[current(y * view.width + x)] & 3u;
+    var colors = array<vec3<f32>, 4>(AIR, SAND, BEDROCK, VACUUM);
     return vec4(colors[material], 1.0);
 }

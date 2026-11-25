@@ -1,6 +1,6 @@
-//! Falling Entropy Engine, v01.00: air, sand and bedrock on a synchronized hex lattice, moved by
+//! Falling Entropy Engine, v01.01: air, sand, vacuum and bedrock on a synchronized hex lattice, moved by
 //! contracts biased by the physics distribution. The lattice lives on the GPU; the brush paints
-//! sand into air and erases; the config panel tunes the physics, the rates, the cell size and the
+//! sand or vacuum and erases; the config panel tunes the physics, the rates, the cell size and the
 //! brush, and picks a preset scene.
 //!
 //! Native: `cargo run -p sand [-- --scene NAME]`. Web: `trunk serve` from this folder, with
@@ -32,10 +32,9 @@ pub struct Config {
     pub gravity: i32,
     pub mass_air: i32,
     pub mass_sand: i32,
-    pub restless: i32,
-    pub align: i32,
     pub into_air: i32,
     pub into_sand: i32,
+    pub into_vacuum: i32,
 }
 
 impl Default for Config {
@@ -52,10 +51,9 @@ impl Default for Config {
             gravity: p.gravity as i32,
             mass_air: p.mass_air as i32,
             mass_sand: p.mass_sand as i32,
-            restless: p.restless as i32,
-            align: p.align as i32,
             into_air: p.into_air as i32,
             into_sand: p.into_sand as i32,
+            into_vacuum: p.into_vacuum as i32,
         }
     }
 }
@@ -69,10 +67,9 @@ impl Config {
             gravity: u(self.gravity),
             mass_air: u(self.mass_air),
             mass_sand: u(self.mass_sand),
-            restless: u(self.restless),
-            align: u(self.align),
             into_air: u(self.into_air),
             into_sand: u(self.into_sand),
+            into_vacuum: u(self.into_vacuum),
         }
     }
 
@@ -90,10 +87,9 @@ impl Tunable for Config {
             .int("gravity", "Gravity: impulse per move, per mass", "", 0..=1024, |c| &mut c.gravity)
             .int("mass_sand", "Mass of sand", "", 0..=16, |c| &mut c.mass_sand)
             .int("mass_air", "Mass of air", "", 0..=16, |c| &mut c.mass_air)
-            .int("restless", "Restless: weight of any compatible move", "", 0..=255, |c| &mut c.restless)
-            .int("align", "Velocity's pull on direction", "", 0..=255, |c| &mut c.align)
             .int("into_air", "Weight of moving into air", "", 0..=255, |c| &mut c.into_air)
-            .int("into_sand", "Weight of moving into sand", "", 0..=255, |c| &mut c.into_sand);
+            .int("into_sand", "Weight of moving into sand", "", 0..=255, |c| &mut c.into_sand)
+            .int("into_vacuum", "Weight of moving into vacuum", "", 0..=255, |c| &mut c.into_vacuum);
         s.group("Rates").float("sim_rate", "Sim rate", "phases/s", 1.0..=960.0, 1.0, |c| &mut c.sim_rate).int(
             "max_phases",
             "Most phases per render frame",
@@ -104,7 +100,7 @@ impl Tunable for Config {
         s.group("Lattice")
             .float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size)
             .choice("scene", "Scene (rebuilds)", &SCENE_NAMES, |c| &mut c.scene);
-        s.group("Brush").choice("tool", "Tool", &["Sand", "Erase"], |c| &mut c.tool).float(
+        s.group("Brush").choice("tool", "Tool", &["Sand", "Vacuum", "Erase"], |c| &mut c.tool).float(
             "brush_radius",
             "Radius",
             "cells",
@@ -176,7 +172,7 @@ impl Game {
 
     fn stamp(&mut self, at: Vec2) {
         let c = &self.tuner.current;
-        let material = [Material::Sand, Material::Air][c.tool.min(1)];
+        let material = [Material::Sand, Material::Vacuum, Material::Air][c.tool.min(2)];
         self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, material });
     }
 
