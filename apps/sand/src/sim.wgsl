@@ -24,7 +24,11 @@ struct Params {
     into_water: u32,
     into_sand: u32,
     into_vacuum: u32,
+    deflect_air: u32,
+    deflect_water: u32,
+    deflect_sand: u32,
     _pad0: u32,
+    _pad1: u32,
 }
 
 // A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
@@ -51,9 +55,11 @@ const SLATE: u32 = 4u;
 const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
 const SALT_PROPOSE: u32 = 2u;
+const SALT_DEFLECT: u32 = 3u;
 const FACTOR_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const ALONG_CAP: u32 = 1024u;
+const DEFLECT_CAP: u32 = 1024u;
 const SCALE: i32 = 256;
 
 fn mix(v0: u32) -> u32 {
@@ -208,6 +214,31 @@ fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
     return factor(dest) * min(mass(m), MASS_CAP) * ((a * a) >> 8u);
 }
 
+// `Physics::deflected`: a rejected offer's effect on its origin. The velocity turns away from d,
+// perpendicular to it, by the material's deflection, to the side it already leans (or the side bits
+// picks when dead on), then back to the steady scale.
+fn deflected(m: u32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
+    var k = 0u;
+    if m == AIR {
+        k = params.deflect_air;
+    } else if m == WATER {
+        k = params.deflect_water;
+    } else if m == SAND {
+        k = params.deflect_sand;
+    }
+    let ki = i32(min(k, DEFLECT_CAP));
+    if ki == 0 {
+        return v;
+    }
+    let s = step_of(d);
+    let lean = -v.x * s.y + v.y * s.x;
+    var side = -1;
+    if lean > 0 || (lean == 0 && (bits & 1u) == 1u) {
+        side = 1;
+    }
+    return steady(vec2(v.x - side * ki * s.y / 2, v.y + side * ki * s.x / 2));
+}
+
 // `Physics::moved`: gravity's impulse, added on a move, then back to the steady scale.
 fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
     let impulse = i32(min(params.gravity, 4096u) * min(mass(m), MASS_CAP));
@@ -241,12 +272,15 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     live.accept = 0u;
     let committed = me.offer != 0u;
 
-    // Resolve: the offer kept back has its verdict now. Accepted: left vacuum.
+    // Resolve: the offer kept back has its verdict now, and its effect on me. Accepted: left vacuum.
+    // Rejected: the particle stays, deflected.
     if kept.offer != 0u {
         let d = kept.offer - 1u;
         let verdict = (*seen)[d];
         if verdict.accept == opposite(d) + 1u {
             live = holding(VACUUM);
+        } else {
+            live.velocity = deflected(live.material, live.velocity, d, hash(x, y, phase, SALT_DEFLECT));
         }
     }
 

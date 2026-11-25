@@ -13,6 +13,9 @@
 //!   displaced. A particle may still offer into a cell holding another (air, water or sand, each
 //!   weighted), which evaluate rejects.
 //! - **Slate** is static, like bedrock: nothing offers into it.
+//! - **Deflection**: the effect of a rejected offer on its origin. The particle's velocity turns a
+//!   little away from the cell that refused it, to the side its velocity already leans (or, dead on,
+//!   to a side the hash picks), by its material's deflection.
 
 use crate::{Dir, Material, Velocity};
 
@@ -30,6 +33,10 @@ pub struct Physics {
     pub into_water: u32,
     pub into_sand: u32,
     pub into_vacuum: u32,
+    /// Each material's deflection: how far a rejection turns its velocity, in velocity units.
+    pub deflect_air: u32,
+    pub deflect_water: u32,
+    pub deflect_sand: u32,
 }
 
 impl Default for Physics {
@@ -43,6 +50,9 @@ impl Default for Physics {
             into_water: 8,
             into_sand: 1,
             into_vacuum: 16,
+            deflect_air: 64,
+            deflect_water: 32,
+            deflect_sand: 2,
         }
     }
 }
@@ -52,6 +62,7 @@ const FACTOR_CAP: u32 = 255;
 const MASS_CAP: u32 = 16;
 /// The largest `along` counts for: a steady-scale velocity reaches at most 3 * `SCALE`.
 const ALONG_CAP: u32 = 1 << 10;
+const DEFLECT_CAP: u32 = 1 << 10;
 
 impl Physics {
     pub fn mass(&self, m: Material) -> u32 {
@@ -94,6 +105,31 @@ impl Physics {
             Material::Bedrock | Material::Slate => 0,
         }
         .min(FACTOR_CAP)
+    }
+
+    pub fn deflection(&self, m: Material) -> u32 {
+        match m {
+            Material::Air => self.deflect_air,
+            Material::Water => self.deflect_water,
+            Material::Sand => self.deflect_sand,
+            _ => 0,
+        }
+        .min(DEFLECT_CAP)
+    }
+
+    /// The velocity of a particle of `m` whose offer toward `d` was rejected: turned away from `d`,
+    /// perpendicular to it, by `m`'s deflection, to the side the velocity already leans, or when it
+    /// points dead on, to the side `bits` picks; then back to the steady scale.
+    pub fn deflected(&self, m: Material, v: Velocity, d: Dir, bits: u32) -> Velocity {
+        let k = self.deflection(m) as i32;
+        if k == 0 {
+            return v;
+        }
+        let (sx, sy) = d.step();
+        // The perpendicular (-sy, sx), and how far the velocity already leans along it.
+        let lean = -(v.x as i32) * sy + v.y as i32 * sx;
+        let side = if lean > 0 || (lean == 0 && bits & 1 == 1) { 1 } else { -1 };
+        Velocity::steady(v.x as i32 - side * k * sy / 2, v.y as i32 + side * k * sx / 2)
     }
 
     /// The velocity of a particle of `m` that just moved: gravity's impulse added, then brought back

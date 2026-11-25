@@ -489,14 +489,44 @@ fn resolve_accepted_into_vacuum_the_origin_is_left_vacuum() {
 }
 
 #[test]
-fn resolve_rejected_the_origin_keeps_its_particle_and_velocity() {
-    // The neighbor below accepted someone else; mine was rejected. I propose again at once.
+fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
+    // The neighbor below accepted someone else; mine was rejected. My particle stays, its velocity
+    // turned a little away from below, to the side it already leaned (right). I propose again.
+    let p = Physics::default();
     let v = Velocity { x: 100, y: 256 };
     let kept = offering(Dir::Down, v);
     let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..sand(DOWN) })]);
-    let s = next(sand(v), kept, seen, 2, 2, 0, &Physics::default());
-    assert_eq!((s.material, s.velocity), (Material::Sand, v));
+    let s = next(sand(v), kept, seen, 2, 2, 0, &p);
+    assert_eq!(s.material, Material::Sand);
+    assert_eq!(s.velocity, p.deflected(Material::Sand, v, Dir::Down, 0));
+    assert!(s.velocity.x > v.x && s.velocity.y == 256, "{:?}", s.velocity);
     assert!(s.offer.is_some());
+}
+
+#[test]
+fn deflection_turns_away_to_the_side_it_leans_or_the_hash_picks() {
+    let p = Physics::default();
+    // Leaning right, a rejection below turns it further right, whatever the bits.
+    let v = Velocity { x: 10, y: 256 };
+    for bits in [0, 1] {
+        assert!(p.deflected(Material::Water, v, Dir::Down, bits).x > 10);
+    }
+    // Dead on, the bits pick the side.
+    let (a, b) = (p.deflected(Material::Water, DOWN, Dir::Down, 0), p.deflected(Material::Water, DOWN, Dir::Down, 1));
+    assert!(a.x * b.x < 0, "{a:?} {b:?}");
+    // Water deflects more than sand; a material with no deflection keeps its velocity.
+    assert!(
+        p.deflected(Material::Water, DOWN, Dir::Down, 1).x.abs()
+            > p.deflected(Material::Sand, DOWN, Dir::Down, 1).x.abs()
+    );
+    let none = Physics { deflect_sand: 0, ..p };
+    assert_eq!(none.deflected(Material::Sand, v, Dir::Down, 1), v);
+    // Repeated rejections keep turning it, toward sideways.
+    let mut w = DOWN;
+    for _ in 0..20 {
+        w = p.deflected(Material::Water, w, Dir::Down, 1);
+    }
+    assert!(w.x.abs() >= w.y.abs(), "{w:?}");
 }
 
 // Contracts across the lattice
@@ -612,9 +642,10 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
         w.step();
     }
     assert_eq!(materials(&w), before, "{}", w.ascii());
-    // A heap, not a layer: the middle column stands well above the edges.
+    // A heap, not a layer: the middle column stands above the edges. (Sand's small deflection
+    // lowered it from 6 rows of rise to 4 in v01.05.)
     let top = |x: i32| (0..20).find(|&y| w.material(x, y) == Material::Sand).unwrap_or(20);
-    assert!(top(20) + 5 < top(5), "{}", w.ascii());
+    assert!(top(20) + 3 < top(5), "{}", w.ascii());
 }
 
 // Slate
@@ -704,4 +735,27 @@ fn movement_air_is_a_ball_and_falls_in_vacuum() {
     }
     assert!(mean_row(&w, Material::Air) > before + 8.0, "{}", w.ascii());
     assert_eq!(w.count(Material::Air), cells);
+}
+
+#[test]
+fn movement_water_seeks_its_level_where_sand_heaps() {
+    // The same pour, in sand and in water: deflection on rejection spreads water into a layer, while
+    // sand, deflecting little, stands in a heap.
+    let pour = |m: Material| {
+        let mut w = World::new(40, 20);
+        for p in 0..5000u32 {
+            if p % 12 == 0 && p < 1800 {
+                w.stamp(20.0, 1.0, 0.8, m);
+            }
+            w.step();
+        }
+        w
+    };
+    let w = pour(Material::Water);
+    let depth: Vec<usize> = (0..40).map(|x| (0..20).filter(|&y| w.material(x, y) == Material::Water).count()).collect();
+    let (min, max) = (depth.iter().min().unwrap(), depth.iter().max().unwrap());
+    assert!(max - min <= 5, "water depths {depth:?}\n{}", w.ascii());
+    let s = pour(Material::Sand);
+    let top = |x: i32| (0..20).find(|&y| s.material(x, y) == Material::Sand).unwrap_or(20);
+    assert!(top(20) + 3 < top(5), "{}", s.ascii());
 }

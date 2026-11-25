@@ -17,6 +17,7 @@ use crate::{Dir, Physics, State, hash};
 /// Salts for the selections, so they draw independent random bits.
 pub const SALT_EVALUATE: u32 = 1;
 pub const SALT_PROPOSE: u32 = 2;
+pub const SALT_DEFLECT: u32 = 3;
 
 /// One cell's update: its next published state from its own state, the state it kept back from
 /// the phase before, and its neighbors' published state, all at the same phase (outside the
@@ -28,7 +29,7 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     // An offer I published this phase is evaluated this phase; its particle stays committed.
     let committed = me.offer.is_some();
 
-    resolve(&mut live, kept, &seen);
+    resolve(&mut live, kept, &seen, x, y, phase, physics);
     if !committed {
         evaluate(&mut live, &seen, x, y, phase, physics);
     }
@@ -40,14 +41,17 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     live
 }
 
-/// Resolve: the offer I published last phase has its verdict now, in the neighbor's acceptance.
-/// Accepted, the particle has moved: I am left vacuum.
-/// Rejected, I keep my particle and its velocity.
-fn resolve(live: &mut State, kept: State, seen: &[State; 6]) {
+/// Resolve: the offer I published last phase has its verdict now, in the neighbor's acceptance,
+/// and I apply the contract's effect on me. Accepted, the particle has moved: I am left vacuum.
+/// Rejected, I keep my particle, and it is deflected (`Physics::deflected`).
+#[allow(clippy::too_many_arguments)]
+fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let Some(d) = kept.offer else { return };
     let verdict = seen[d as usize];
     if verdict.accept == Some(d.opposite()) {
         *live = State::VACUUM;
+    } else {
+        live.velocity = physics.deflected(live.material, live.velocity, d, hash(x, y, phase, SALT_DEFLECT));
     }
 }
 

@@ -1,4 +1,4 @@
-//! Falling Entropy Engine, v01.04: air, water, sand, slate and bedrock in vacuum on a synchronized hex
+//! Falling Entropy Engine, v01.05: air, water, sand, slate and bedrock in vacuum on a synchronized hex
 //! lattice, moved by contracts biased by the physics distribution. The lattice lives on the GPU; the
 //! brush paints sand, water, air or slate and erases to vacuum; the config panel tunes the physics, the rates, the cell size and the
 //! brush, and picks a preset scene.
@@ -36,6 +36,9 @@ pub struct Config {
     pub into_water: i32,
     pub into_sand: i32,
     pub into_vacuum: i32,
+    pub deflect_air: i32,
+    pub deflect_water: i32,
+    pub deflect_sand: i32,
 }
 
 impl Default for Config {
@@ -56,6 +59,9 @@ impl Default for Config {
             into_water: p.into_water as i32,
             into_sand: p.into_sand as i32,
             into_vacuum: p.into_vacuum as i32,
+            deflect_air: p.deflect_air as i32,
+            deflect_water: p.deflect_water as i32,
+            deflect_sand: p.deflect_sand as i32,
         }
     }
 }
@@ -73,6 +79,9 @@ impl Config {
             into_water: u(self.into_water),
             into_sand: u(self.into_sand),
             into_vacuum: u(self.into_vacuum),
+            deflect_air: u(self.deflect_air),
+            deflect_water: u(self.deflect_water),
+            deflect_sand: u(self.deflect_sand),
         }
     }
 
@@ -93,7 +102,10 @@ impl Tunable for Config {
             .int("into_air", "Weight of moving into air", "", 0..=255, |c| &mut c.into_air)
             .int("into_water", "Weight of moving into water", "", 0..=255, |c| &mut c.into_water)
             .int("into_sand", "Weight of moving into sand", "", 0..=255, |c| &mut c.into_sand)
-            .int("into_vacuum", "Weight of moving into vacuum", "", 0..=255, |c| &mut c.into_vacuum);
+            .int("into_vacuum", "Weight of moving into vacuum", "", 0..=255, |c| &mut c.into_vacuum)
+            .int("deflect_water", "Deflection of water on rejection", "", 0..=1024, |c| &mut c.deflect_water)
+            .int("deflect_sand", "Deflection of sand on rejection", "", 0..=1024, |c| &mut c.deflect_sand)
+            .int("deflect_air", "Deflection of air on rejection", "", 0..=1024, |c| &mut c.deflect_air);
         s.group("Rates").float("sim_rate", "Sim rate", "phases/s", 1.0..=960.0, 1.0, |c| &mut c.sim_rate).int(
             "max_phases",
             "Most phases per render frame",

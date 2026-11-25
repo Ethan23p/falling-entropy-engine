@@ -111,7 +111,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 48);
+        let params = uniform("params", 64);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -165,6 +165,10 @@ impl Lattice {
             p.into_water,
             p.into_sand,
             p.into_vacuum,
+            p.deflect_air,
+            p.deflect_water,
+            p.deflect_sand,
+            0,
             0,
         ];
         queue.write_buffer(&self.params, 0, &words(&params));
