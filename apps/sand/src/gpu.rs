@@ -8,6 +8,8 @@ use engine::wgpu;
 
 /// The most stamps one brush pass applies.
 pub const MAX_STAMPS: usize = 256;
+/// The sim's uniforms: four words, then four per material (`Params` in sim.wgsl).
+const PARAMS_BYTES: u64 = 4 * (4 + 4 * 6);
 
 /// A brush stamp, in cell units: `y` already includes odd columns' half-cell shift.
 #[derive(Clone, Copy, Debug)]
@@ -111,7 +113,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 64);
+        let params = uniform("params", PARAMS_BYTES);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -153,24 +155,12 @@ impl Lattice {
     ) {
         let stamps = &stamps[stamps.len().saturating_sub(MAX_STAMPS)..];
         let p = physics;
-        let params = [
-            self.width as u32,
-            self.height as u32,
-            stamps.len() as u32,
-            p.gravity,
-            p.mass_air,
-            p.mass_water,
-            p.mass_sand,
-            p.into_air,
-            p.into_water,
-            p.into_sand,
-            p.into_vacuum,
-            p.deflect_air,
-            p.deflect_water,
-            p.deflect_sand,
-            0,
-            0,
-        ];
+        // The lattice's size, the stamp count and gravity, then each material's properties
+        // (mass, into, deflect, padding), in encoded order.
+        let mut params = vec![self.width as u32, self.height as u32, stamps.len() as u32, p.gravity];
+        for m in &p.materials {
+            params.extend([m.mass, m.into, m.deflect, 0]);
+        }
         queue.write_buffer(&self.params, 0, &words(&params));
         let (gx, gy) = self.groups();
         if !stamps.is_empty() {
@@ -376,7 +366,7 @@ mod tests {
             }
         }
 
-        // The brush: matter only into vacuum, erasing anything but bedrock, in order.
+        // The brush: a particle only into a cell holding nothing, erasing anything but bedrock, in order.
         let stamps = [
             Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Sand },
             Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },

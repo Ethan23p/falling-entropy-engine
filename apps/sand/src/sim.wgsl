@@ -1,34 +1,33 @@
-// The sim on the GPU: a line-for-line mirror of crates/sim (`update::next`, `World::update`,
-// `World::paint`, `physics`). Keep the two identical; the GPU parity test checks them bit for bit.
+// The sim on the GPU: a line-for-line mirror of crates/sim, in the same sections as its modules
+// (lattice, particle, cell, physics, contract, selection, update, world, brush). Keep the two
+// identical; the GPU parity test checks them bit for bit.
 //
 // A cell keeps four words: per phase parity, a state word and a velocity word. Word 4i + (p & 1)
 // holds cell i's state at phase p (bits 0-18) and p itself (bits 19-31, wrapping); word
 // 4i + 2 + (p & 1) holds its velocity then. A neighbor at phase p reads those words, which the cell
 // doesn't overwrite until it reaches p + 2, so cells run in any order and in place.
-// A state (`State::encode`): the material in bits 0-2 (0 air, 1 sand, 2 bedrock, 3 vacuum,
-// 4 slate, 5 water), the offer in bits 3-5 and the acceptance in bits 6-8 (1 + a direction, or 0
-// for none). A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
+// A state (`State::encode`): what the cell holds in bits 0-2 (0 air, 1 sand, 2 bedrock,
+// 3 vacuum: nothing, 4 slate, 5 water), the offer in bits 3-5 and the acceptance in bits 6-8
+// (1 + a direction, or 0 for none). A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
-// `Physics` in crates/sim, after the lattice's size and the stamp count.
+// A material's tunable properties (`physics::Properties`).
+struct Properties {
+    mass: u32,
+    into: u32,
+    deflect: u32,
+    _pad: u32,
+}
+
+// The lattice's size and the stamp count, then the physics distribution's data (`Physics`):
+// gravity, and each material's properties, indexed by its encoded value.
 struct Params {
     width: i32,
     height: i32,
     stamps: u32,
     gravity: u32,
-    mass_air: u32,
-    mass_water: u32,
-    mass_sand: u32,
-    into_air: u32,
-    into_water: u32,
-    into_sand: u32,
-    into_vacuum: u32,
-    deflect_air: u32,
-    deflect_water: u32,
-    deflect_sand: u32,
-    _pad0: u32,
-    _pad1: u32,
+    materials: array<Properties, 6>,
 }
 
 // A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
@@ -56,11 +55,13 @@ const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
-const FACTOR_CAP: u32 = 255u;
+const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const ALONG_CAP: u32 = 1024u;
 const DEFLECT_CAP: u32 = 1024u;
 const SCALE: i32 = 256;
+
+// Randomness (`random`).
 
 fn mix(v0: u32) -> u32 {
     var v = v0;
@@ -74,6 +75,8 @@ fn mix(v0: u32) -> u32 {
 fn hash(x: i32, y: i32, phase: u32, salt: u32) -> u32 {
     return mix(u32(x) ^ mix(u32(y) ^ mix(phase ^ mix(salt))));
 }
+
+// Lattice (`lattice`).
 
 fn neighbor(x: i32, y: i32, d: u32) -> vec2<i32> {
     let odd = x & 1;
@@ -107,7 +110,7 @@ fn opposite(d: u32) -> u32 {
     return (d + 3u) % 6u;
 }
 
-// A cell's published state, decoded.
+// Cell (`cell`): a cell's published state, decoded: its live particle and its live contracts.
 struct State {
     material: u32,
     velocity: vec2<i32>,
@@ -143,7 +146,7 @@ fn encode_velocity(v: vec2<i32>) -> u32 {
     return (bitcast<u32>(v.x) & 0xffffu) | (bitcast<u32>(v.y) << 16u);
 }
 
-// `State::holding`: a particle that moves intends to move down.
+// `State::holding`: a cell holding a fresh particle (or nothing); one that moves intends to move down.
 fn holding(m: u32) -> State {
     var v = vec2(0, 0);
     if moves(m) {
@@ -152,8 +155,18 @@ fn holding(m: u32) -> State {
     return State(m, v, 0u, 0u);
 }
 
+// Particle (`particle`): `Material::is_particle`, `is_static`, `moves`.
+
+fn is_particle(m: u32) -> bool {
+    return m != VACUUM;
+}
+
+fn is_static(m: u32) -> bool {
+    return m == SLATE || m == BEDROCK;
+}
+
 fn moves(m: u32) -> bool {
-    return m == AIR || m == SAND || m == WATER;
+    return is_particle(m) && !is_static(m);
 }
 
 // `Velocity::steady`: the direction of v at the steady scale; down when it has none.
@@ -171,63 +184,80 @@ fn along(v: vec2<i32>, d: u32) -> i32 {
     return v.x * s.x + v.y * s.y;
 }
 
-// The physics distribution (`physics` in crates/sim).
+// The physics distribution (`physics`): constants and pure functions only.
 
 fn mass(m: u32) -> u32 {
-    switch m {
-        case 0u: { return params.mass_air; }
-        case 1u: { return params.mass_sand; }
-        case 5u: { return params.mass_water; }
-        default: { return 0u; }
-    }
+    return min(params.materials[m].mass, MASS_CAP);
 }
 
-// `Physics::factor`: the weight multiplier for offering into a cell holding dest.
-fn factor(dest: u32) -> u32 {
-    var f = 0u;
-    if dest == AIR {
-        f = params.into_air;
-    } else if dest == WATER {
-        f = params.into_water;
-    } else if dest == SAND {
-        f = params.into_sand;
-    } else if dest == VACUUM {
-        f = params.into_vacuum;
-    }
-    return min(f, FACTOR_CAP);
+// `Physics::into`: how amenable a particle is to offering into a cell holding dest.
+fn into(dest: u32) -> u32 {
+    return min(params.materials[dest].into, INTO_CAP);
 }
 
-// `Physics::compatible`: moving particles offer into vacuum, or into another moving particle whose
-// weight multiplier isn't zero.
-fn compatible(origin: u32, dest: u32) -> bool {
-    return moves(origin) && (dest == VACUUM || (moves(dest) && factor(dest) > 0u));
+// `Physics::deflection`.
+fn deflection(m: u32) -> u32 {
+    return min(params.materials[m].deflect, DEFLECT_CAP);
 }
 
-// `Physics::accepts`: only into vacuum.
-fn accepts(origin: u32, dest: u32) -> bool {
-    return moves(origin) && dest == VACUUM;
+// `Physics::offers_to`, propose's exclusion: what might a cell holding a particle of m, intending
+// v, offer to? A neighbor toward d holding nothing, or a particle that moves and that m is amenable
+// to, lying ahead of the intent (provisional: within 90 degrees, a hard limit for every material).
+fn offers_to(m: u32, v: vec2<i32>, d: u32, dest: u32) -> bool {
+    let amenable = !is_particle(dest) || (moves(dest) && into(dest) > 0u);
+    return moves(m) && amenable && along(v, d) > 0;
+}
+
+// `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a particle rejects
+// every offer of one; holding nothing, it can take one.
+fn entertains(offered: u32, dest: u32) -> bool {
+    return moves(offered) && !is_particle(dest);
 }
 
 // `Physics::weight`.
 fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
     let a = min(u32(max(along(v, d), 0)), ALONG_CAP);
-    return factor(dest) * min(mass(m), MASS_CAP) * ((a * a) >> 8u);
+    return into(dest) * mass(m) * ((a * a) >> 8u);
 }
 
-// `Physics::deflected`: a rejected offer's effect on its origin. The velocity turns away from d,
-// perpendicular to it, by the material's deflection, to the side it already leans (or the side bits
-// picks when dead on), then back to the steady scale.
-fn deflected(m: u32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
-    var k = 0u;
-    if m == AIR {
-        k = params.deflect_air;
-    } else if m == WATER {
-        k = params.deflect_water;
-    } else if m == SAND {
-        k = params.deflect_sand;
-    }
-    let ki = i32(min(k, DEFLECT_CAP));
-    if ki == 0 {
+// `Physics::moved`, gravity: its impulse, added on a move, then back to the steady scale.
+fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
+    let impulse = i32(min(params.gravity, 4096u) * mass(m));
+    return steady(vec2(v.x, v.y + impulse));
+}
+
+// Contract (`contract`): an offer's terms pair each condition (the verdict) with an effect on each
+// end. Accepted: the origin releases, the target receives. Rejected: the origin deflects, the
+// target does nothing.
+
+// `Offer::verdict`: an offer toward d is accepted if the target's verdict names this cell.
+fn accepted(d: u32, dest: State) -> bool {
+    return dest.accept == opposite(d) + 1u;
+}
+
+// `Effect::Release`: the particle leaves; the cell holds nothing.
+fn release(live: ptr<function, State>) {
+    *live = holding(VACUUM);
+}
+
+// `Effect::Receive`: the particle arrives from the origin toward d, with gravity's impulse, and the
+// verdict names that origin.
+fn receive(live: ptr<function, State>, d: u32, origin: State) {
+    (*live).material = origin.material;
+    (*live).velocity = moved(origin.material, origin.velocity);
+    (*live).accept = d + 1u;
+}
+
+// `Effect::Deflect`: the particle stays, its intent turned away from the target toward d by its
+// material's deflection.
+fn deflect(live: ptr<function, State>, d: u32, bits: u32) {
+    (*live).velocity = deflected(i32(deflection((*live).material)), (*live).velocity, d, bits);
+}
+
+// `contract::deflected`: v turned away from d by k, perpendicular to it, to the side it already
+// leans (or the side bits picks when dead on), then back to the steady scale.
+fn deflected(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
+    if k == 0 {
         return v;
     }
     let s = step_of(d);
@@ -236,16 +266,10 @@ fn deflected(m: u32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
     if lean > 0 || (lean == 0 && (bits & 1u) == 1u) {
         side = 1;
     }
-    return steady(vec2(v.x - side * ki * s.y / 2, v.y + side * ki * s.x / 2));
+    return steady(vec2(v.x - side * k * s.y / 2, v.y + side * k * s.x / 2));
 }
 
-// `Physics::moved`: gravity's impulse, added on a move, then back to the steady scale.
-fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
-    let impulse = i32(min(params.gravity, 4096u) * min(mass(m), MASS_CAP));
-    return steady(vec2(v.x, v.y + impulse));
-}
-
-// `physics::select`: 1 + the index chosen, or 0 when every weight is zero.
+// Selection (`selection::select`): 1 + the index chosen, or 0 when every weight is zero.
 fn select_from(weights: ptr<function, array<u32, 6>>, bits: u32) -> u32 {
     var total = 0u;
     for (var i = 0u; i < 6u; i++) {
@@ -272,44 +296,43 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     live.accept = 0u;
     let committed = me.offer != 0u;
 
-    // Resolve: the offer kept back has its verdict now, and its effect on me. Accepted: left vacuum.
-    // Rejected: the particle stays, deflected.
+    // Resolve: the offer kept back has its verdict now; apply the contract's effect on its origin.
     if kept.offer != 0u {
         let d = kept.offer - 1u;
-        let verdict = (*seen)[d];
-        if verdict.accept == opposite(d) + 1u {
-            live = holding(VACUUM);
+        if accepted(d, (*seen)[d]) {
+            release(&live);
         } else {
-            live.velocity = deflected(live.material, live.velocity, d, hash(x, y, phase, SALT_DEFLECT));
+            deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
         }
     }
 
-    // Evaluate: select one offer whose conditions hold; it fills the vacuum, with gravity's impulse.
+    // Evaluate: the offers that target me, excluded unless the physics distribution entertains them,
+    // the rest weighted; the one selected is accepted. Holding one particle at most, I then exclude
+    // the rest, which are rejected by not being named.
     if !committed {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
             let origin = (*seen)[d];
-            if origin.offer == opposite(d) + 1u && accepts(origin.material, live.material) {
+            if origin.offer == opposite(d) + 1u && entertains(origin.material, live.material) {
                 weights[d] = max(weight(origin.material, origin.velocity, opposite(d), live.material), 1u);
             }
         }
         let i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE));
         if i != 0u {
-            let origin = (*seen)[i - 1u];
-            live.material = origin.material;
-            live.velocity = moved(origin.material, origin.velocity);
-            live.accept = i;
+            receive(&live, i - 1u, (*seen)[i - 1u]);
         }
     }
 
     // Evolve: no natural contracts yet.
 
-    // Propose: from the six neighbors, exclude the incompatible, select among the rest, weighted.
+    // Publish, then propose, in one write (see `update::next`).
+    // Propose: from the six neighbors, exclude those it wouldn't offer to, select among the rest,
+    // weighted.
     if !committed {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
             let dest = (*seen)[d].material;
-            if compatible(live.material, dest) {
+            if offers_to(live.material, live.velocity, d, dest) {
                 weights[d] = weight(live.material, live.velocity, d, dest);
             }
         }
@@ -317,6 +340,8 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     }
     return live;
 }
+
+// World (`world`): the cells as stored, and the synchronizer.
 
 // The parity of cell i's current words: the state word tagged with the later phase.
 fn current(i: i32) -> i32 {
@@ -364,7 +389,8 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&cells[4 * i + 3 - parity], encode_velocity(s.velocity));
 }
 
-// The brush (`World::paint`), between phases: matter goes only into cells holding vacuum; erasing
+// The brush (`brush`, `World::paint`), between phases: a particle is spawned only into a cell holding
+// nothing; erasing
 // (vacuum) empties anything but bedrock; a painted particle intends to move down. Cells engaged in
 // a contract (an offer out, one awaiting its verdict, or a particle in transport) are left alone.
 // Stamps apply in order.
