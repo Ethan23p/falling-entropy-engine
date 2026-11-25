@@ -43,7 +43,9 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        use sim::Material::{Air, Sand, Vacuum, Water};
         let p = sim::Physics::default();
+        let of = |m| p.of(m);
         Self {
             sim_rate: 240.0,
             max_phases: 16,
@@ -52,37 +54,37 @@ impl Default for Config {
             brush_radius: 3.0,
             tool: 0,
             gravity: p.gravity as i32,
-            mass_air: p.mass_air as i32,
-            mass_water: p.mass_water as i32,
-            mass_sand: p.mass_sand as i32,
-            into_air: p.into_air as i32,
-            into_water: p.into_water as i32,
-            into_sand: p.into_sand as i32,
-            into_vacuum: p.into_vacuum as i32,
-            deflect_air: p.deflect_air as i32,
-            deflect_water: p.deflect_water as i32,
-            deflect_sand: p.deflect_sand as i32,
+            mass_air: of(Air).mass as i32,
+            mass_water: of(Water).mass as i32,
+            mass_sand: of(Sand).mass as i32,
+            into_air: of(Air).into as i32,
+            into_water: of(Water).into as i32,
+            into_sand: of(Sand).into as i32,
+            into_vacuum: of(Vacuum).into as i32,
+            deflect_air: of(Air).deflect as i32,
+            deflect_water: of(Water).deflect as i32,
+            deflect_sand: of(Sand).deflect as i32,
         }
     }
 }
 
 impl Config {
-    /// The physics distribution's tunables, as the sim takes them.
+    /// The physics distribution's data, as the sim takes it: the defaults, with the tuned values.
     pub fn physics(&self) -> sim::Physics {
+        use sim::Material::{Air, Sand, Vacuum, Water};
         let u = |v: i32| v.max(0) as u32;
-        sim::Physics {
-            gravity: u(self.gravity),
-            mass_air: u(self.mass_air),
-            mass_water: u(self.mass_water),
-            mass_sand: u(self.mass_sand),
-            into_air: u(self.into_air),
-            into_water: u(self.into_water),
-            into_sand: u(self.into_sand),
-            into_vacuum: u(self.into_vacuum),
-            deflect_air: u(self.deflect_air),
-            deflect_water: u(self.deflect_water),
-            deflect_sand: u(self.deflect_sand),
-        }
+        let mut p = sim::Physics { gravity: u(self.gravity), ..sim::Physics::default() };
+        p.of_mut(Air).mass = u(self.mass_air);
+        p.of_mut(Water).mass = u(self.mass_water);
+        p.of_mut(Sand).mass = u(self.mass_sand);
+        p.of_mut(Air).into = u(self.into_air);
+        p.of_mut(Water).into = u(self.into_water);
+        p.of_mut(Sand).into = u(self.into_sand);
+        p.of_mut(Vacuum).into = u(self.into_vacuum);
+        p.of_mut(Air).deflect = u(self.deflect_air);
+        p.of_mut(Water).deflect = u(self.deflect_water);
+        p.of_mut(Sand).deflect = u(self.deflect_sand);
+        p
     }
 
     pub fn scene(&self) -> &'static Scene {

@@ -8,11 +8,11 @@
 //! | Lattice | `lattice`: the hexagonal geometry, directions and neighbors |
 //! | Cell (position, phase, live particle, live contracts) | `cell`: what a cell publishes; `world`: the cells as stored |
 //! | Particle, material properties | `particle`: materials (vacuum is nothing), velocity |
-//! | Contract (conditions, effects, verdicts) | `contract` |
+//! | Contract (terms: conditions paired with effects) | `contract` |
 //! | Update: read, resolve, evaluate, evolve, publish, propose | `update` |
 //! | Synchronizer (phase) | `world`: `World::update`, `World::step` |
 //! | Selection | `selection` |
-//! | Physics distribution, Movement, Gravity | `physics`: constants and pure functions only |
+//! | Physics distribution, Movement, Gravity, material properties | `physics`: data (per-material properties, gravity) and pure functions only |
 //! | Brush | `brush` |
 //!
 //! Randomness (`random`) comes only from the hash of a cell's position, its phase and a salt.

@@ -2,6 +2,7 @@
 //! the physics distribution's policies (`movement_*`, `gravity_*`), and the invariants (geometry,
 //! randomness, synchrony, conservation, the brush, the encoding).
 
+use crate::contract::{Effect, Offer, Verdict};
 use crate::update::next;
 use crate::world::STATE_MASK;
 use crate::*;
@@ -483,7 +484,7 @@ fn gravity_is_an_impulse_on_each_move_turning_velocity_down() {
     // A particle intending to move right that moves turns toward down, at the steady scale.
     let v = Velocity { x: 256, y: 0 };
     let s = next(State::VACUUM, State::AIR, around(&[(Dir::UpLeft, offering(Dir::DownRight, v))]), 2, 2, 0, &p);
-    let impulse = (p.gravity * p.mass_sand) as i32;
+    let impulse = (p.gravity * p.mass(Material::Sand)) as i32;
     assert_eq!(s.velocity, Velocity::steady(256, impulse));
     assert!(s.velocity.y > 0 && s.velocity.x == 256, "{:?}", s.velocity);
     // Already pointing down, it stays down.
@@ -510,9 +511,29 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..sand(DOWN) })]);
     let s = next(sand(v), kept, seen, 2, 2, 0, &p);
     assert_eq!(s.material, Material::Sand);
-    assert_eq!(s.velocity, contract::deflected(&p, Material::Sand, v, Dir::Down, 0));
+    assert_eq!(s.velocity, deflect(&p, Material::Sand, v, Dir::Down, 0));
     assert!(s.velocity.x > v.x && s.velocity.y == 256, "{:?}", s.velocity);
     assert!(s.offer.is_some());
+}
+
+/// A particle of `m` with velocity `v`, after the deflection effect of a rejection by the cell
+/// toward `d`.
+fn deflect(p: &Physics, m: Material, v: Velocity, d: Dir, bits: u32) -> Velocity {
+    let mut s = State { velocity: v, ..State::holding(m) };
+    Effect::Deflect { from: d, bits }.apply(&mut s, p);
+    s.velocity
+}
+
+#[test]
+fn contract_terms_pair_each_verdict_with_an_effect_on_each_end() {
+    let offer = Offer { toward: Dir::Down };
+    let origin = offering(Dir::Down, DOWN);
+    assert_eq!(offer.terms(Verdict::Accepted, origin, 7), (Effect::Release, Effect::Receive { from: Dir::Up, origin }));
+    assert_eq!(offer.terms(Verdict::Rejected, origin, 7), (Effect::Deflect { from: Dir::Down, bits: 7 }, Effect::None));
+    // The origin reads the verdict from the target: accepted only when the target names it.
+    assert_eq!(offer.verdict(State { accept: Some(Dir::Up), ..State::AIR }), Verdict::Accepted);
+    assert_eq!(offer.verdict(State { accept: Some(Dir::UpLeft), ..State::AIR }), Verdict::Rejected);
+    assert_eq!(offer.verdict(State::VACUUM), Verdict::Rejected);
 }
 
 #[test]
@@ -521,25 +542,23 @@ fn deflection_turns_away_to_the_side_it_leans_or_the_hash_picks() {
     // Leaning right, a rejection below turns it further right, whatever the bits.
     let v = Velocity { x: 10, y: 256 };
     for bits in [0, 1] {
-        assert!(contract::deflected(&p, Material::Water, v, Dir::Down, bits).x > 10);
+        assert!(deflect(&p, Material::Water, v, Dir::Down, bits).x > 10);
     }
     // Dead on, the bits pick the side.
-    let (a, b) = (
-        contract::deflected(&p, Material::Water, DOWN, Dir::Down, 0),
-        contract::deflected(&p, Material::Water, DOWN, Dir::Down, 1),
-    );
+    let (a, b) = (deflect(&p, Material::Water, DOWN, Dir::Down, 0), deflect(&p, Material::Water, DOWN, Dir::Down, 1));
     assert!(a.x * b.x < 0, "{a:?} {b:?}");
     // Water deflects more than sand; a material with no deflection keeps its velocity.
     assert!(
-        contract::deflected(&p, Material::Water, DOWN, Dir::Down, 1).x.abs()
-            > contract::deflected(&p, Material::Sand, DOWN, Dir::Down, 1).x.abs()
+        deflect(&p, Material::Water, DOWN, Dir::Down, 1).x.abs()
+            > deflect(&p, Material::Sand, DOWN, Dir::Down, 1).x.abs()
     );
-    let none = Physics { deflect_sand: 0, ..p };
-    assert_eq!(contract::deflected(&none, Material::Sand, v, Dir::Down, 1), v);
+    let mut none = p;
+    none.of_mut(Material::Sand).deflect = 0;
+    assert_eq!(deflect(&none, Material::Sand, v, Dir::Down, 1), v);
     // Repeated rejections keep turning it, toward sideways.
     let mut w = DOWN;
     for _ in 0..20 {
-        w = contract::deflected(&p, Material::Water, w, Dir::Down, 1);
+        w = deflect(&p, Material::Water, w, Dir::Down, 1);
     }
     assert!(w.x.abs() >= w.y.abs(), "{w:?}");
 }
@@ -716,7 +735,7 @@ fn evaluate_water_rejects_sand_nothing_is_swapped_or_displaced() {
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(water(DOWN), State::AIR, seen, 2, 2, 0, &Physics::default());
     assert_eq!((s.material, s.accept), (Material::Water, None));
-    assert!(Physics::default().compatible(Material::Sand, Material::Water));
+    assert!(Physics::default().offers_to(Material::Sand, DOWN, Dir::Down, Material::Water));
 }
 
 #[test]

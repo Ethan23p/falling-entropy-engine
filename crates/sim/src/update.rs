@@ -4,8 +4,9 @@
 //! contracts the stages execute are in `contract`; the selections in evaluate and propose are
 //! biased by the physics distribution (`physics`).
 
+use crate::contract::{Offer, Verdict};
 use crate::selection::select;
-use crate::{Dir, Physics, State, contract, hash};
+use crate::{Dir, Physics, State, hash};
 
 /// Salts for the selections, so they draw independent random bits.
 pub const SALT_EVALUATE: u32 = 1;
@@ -21,7 +22,7 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     // contracts cleared until the stages below write them again.
     let mut live = State { offer: None, accept: None, ..me };
     // An offer I published this phase is being evaluated now; its particle stays committed.
-    let committed = contract::committed(me);
+    let committed = Offer::of(me).is_some();
 
     resolve(&mut live, kept, &seen, x, y, phase, physics);
     if !committed {
@@ -38,17 +39,19 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
 }
 
 /// Resolve: the offer I published last phase (now in my kept-back state) has its verdict in the
-/// target's published state. I execute it: I apply the contract's effect on its origin.
+/// target's published state. I execute it: I apply its terms' effect on me, the origin.
 #[allow(clippy::too_many_arguments)]
 fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
-    let Some(d) = kept.offer else { return };
-    let verdict = contract::verdict(d, seen[d as usize]);
-    contract::resolve(live, d, verdict, hash(x, y, phase, SALT_DEFLECT), physics);
+    let Some(offer) = Offer::of(kept) else { return };
+    let verdict = offer.verdict(seen[offer.toward as usize]);
+    let (mine, _) = offer.terms(verdict, kept, hash(x, y, phase, SALT_DEFLECT));
+    mine.apply(live, physics);
 }
 
 /// Evaluate: the contracts that target me, selected one at a time, biased by the physics
 /// distribution: offers it doesn't entertain are excluded, and the rest weighted (heavier particles
-/// and better-aligned moves first). The selected offer is accepted, executing its effect on me.
+/// and better-aligned moves first). The selected offer is accepted: I apply its terms' effect on me,
+/// the target. A rejected offer's terms have no effect on me.
 /// While contracts remain I would select again, but a cell holds one particle at most: once one is
 /// accepted, the capacity limit excludes the rest, and they are rejected by not being named.
 fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
@@ -60,20 +63,22 @@ fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phy
         }
     }
     let Some(i) = select(&weights, hash(x, y, phase, SALT_EVALUATE)) else { return };
-    contract::accept(live, seen[i], Dir::ALL[i], physics);
+    let offer = Offer { toward: Dir::ALL[i].opposite() };
+    let (_, mine) = offer.terms(Verdict::Accepted, seen[i], 0);
+    mine.apply(live, physics);
 }
 
 /// Evolve: natural contracts, within the cell. None yet.
 fn evolve(_live: &mut State) {}
 
 /// Propose: the particle I host offers to move toward a neighbor, following its velocity. Start
-/// with all six neighbors, exclude those whose published state the physics distribution marks
-/// incompatible, and select among the rest, weighted. Offering commits the particle.
+/// with all six neighbors, exclude those it wouldn't offer to (`Physics::offers_to`), and select
+/// among the rest, weighted. Offering commits the particle.
 fn propose(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
     for d in Dir::ALL {
         let target = seen[d as usize].material;
-        if physics.compatible(live.material, target) {
+        if physics.offers_to(live.material, live.velocity, d, target) {
             weights[d as usize] = physics.weight(live.material, live.velocity, d, target);
         }
     }

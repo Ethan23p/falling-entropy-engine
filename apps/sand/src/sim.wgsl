@@ -12,24 +12,22 @@
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
-// `Physics` in crates/sim, after the lattice's size and the stamp count.
+// A material's tunable properties (`physics::Properties`).
+struct Properties {
+    mass: u32,
+    into: u32,
+    deflect: u32,
+    _pad: u32,
+}
+
+// The lattice's size and the stamp count, then the physics distribution's data (`Physics`):
+// gravity, and each material's properties, indexed by its encoded value.
 struct Params {
     width: i32,
     height: i32,
     stamps: u32,
     gravity: u32,
-    mass_air: u32,
-    mass_water: u32,
-    mass_sand: u32,
-    into_air: u32,
-    into_water: u32,
-    into_sand: u32,
-    into_vacuum: u32,
-    deflect_air: u32,
-    deflect_water: u32,
-    deflect_sand: u32,
-    _pad0: u32,
-    _pad1: u32,
+    materials: array<Properties, 6>,
 }
 
 // A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
@@ -57,7 +55,7 @@ const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
-const FACTOR_CAP: u32 = 255u;
+const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const ALONG_CAP: u32 = 1024u;
 const DEFLECT_CAP: u32 = 1024u;
@@ -189,33 +187,25 @@ fn along(v: vec2<i32>, d: u32) -> i32 {
 // The physics distribution (`physics`): constants and pure functions only.
 
 fn mass(m: u32) -> u32 {
-    switch m {
-        case 0u: { return params.mass_air; }
-        case 1u: { return params.mass_sand; }
-        case 5u: { return params.mass_water; }
-        default: { return 0u; }
-    }
+    return min(params.materials[m].mass, MASS_CAP);
 }
 
-// `Physics::factor`: the weight multiplier for offering into a cell holding dest.
-fn factor(dest: u32) -> u32 {
-    var f = 0u;
-    if dest == AIR {
-        f = params.into_air;
-    } else if dest == WATER {
-        f = params.into_water;
-    } else if dest == SAND {
-        f = params.into_sand;
-    } else if dest == VACUUM {
-        f = params.into_vacuum;
-    }
-    return min(f, FACTOR_CAP);
+// `Physics::into`: how amenable a particle is to offering into a cell holding dest.
+fn into(dest: u32) -> u32 {
+    return min(params.materials[dest].into, INTO_CAP);
 }
 
-// `Physics::compatible`, propose's exclusion: particles that move offer into a neighbor holding
-// nothing, or another particle that moves whose weight multiplier isn't zero; never into a static one.
-fn compatible(origin: u32, dest: u32) -> bool {
-    return moves(origin) && (dest == VACUUM || (moves(dest) && factor(dest) > 0u));
+// `Physics::deflection`.
+fn deflection(m: u32) -> u32 {
+    return min(params.materials[m].deflect, DEFLECT_CAP);
+}
+
+// `Physics::offers_to`, propose's exclusion: what might a cell holding a particle of m, intending
+// v, offer to? A neighbor toward d holding nothing, or a particle that moves and that m is amenable
+// to, lying ahead of the intent (provisional: within 90 degrees, a hard limit for every material).
+fn offers_to(m: u32, v: vec2<i32>, d: u32, dest: u32) -> bool {
+    let amenable = !is_particle(dest) || (moves(dest) && into(dest) > 0u);
+    return moves(m) && amenable && along(v, d) > 0;
 }
 
 // `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a particle rejects
@@ -224,57 +214,50 @@ fn entertains(offered: u32, dest: u32) -> bool {
     return moves(offered) && !is_particle(dest);
 }
 
-// `Physics::weight`. Provisional: zero at or behind 90 degrees from the velocity, for every material.
+// `Physics::weight`.
 fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
     let a = min(u32(max(along(v, d), 0)), ALONG_CAP);
-    return factor(dest) * min(mass(m), MASS_CAP) * ((a * a) >> 8u);
+    return into(dest) * mass(m) * ((a * a) >> 8u);
 }
 
 // `Physics::moved`, gravity: its impulse, added on a move, then back to the steady scale.
 fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
-    let impulse = i32(min(params.gravity, 4096u) * min(mass(m), MASS_CAP));
+    let impulse = i32(min(params.gravity, 4096u) * mass(m));
     return steady(vec2(v.x, v.y + impulse));
 }
 
-// Contract (`contract`): an offer's conditions (its verdict) and its effects on each end.
+// Contract (`contract`): an offer's terms pair each condition (the verdict) with an effect on each
+// end. Accepted: the origin releases, the target receives. Rejected: the origin deflects, the
+// target does nothing.
 
-// `contract::verdict`: an offer toward d is accepted if the target's verdict names this cell.
+// `Offer::verdict`: an offer toward d is accepted if the target's verdict names this cell.
 fn accepted(d: u32, dest: State) -> bool {
     return dest.accept == opposite(d) + 1u;
 }
 
-// `contract::accept`: the effect on the target. The particle from the origin toward d
-// (a direction) arrives with gravity's impulse, and the verdict names that origin.
-fn contract_accept(dest: ptr<function, State>, origin: State, d: u32) {
-    (*dest).material = origin.material;
-    (*dest).velocity = moved(origin.material, origin.velocity);
-    (*dest).accept = d + 1u;
+// `Effect::Release`: the particle leaves; the cell holds nothing.
+fn release(live: ptr<function, State>) {
+    *live = holding(VACUUM);
 }
 
-// `contract::resolve`: the effect on the origin. Accepted: it holds nothing. Rejected: it keeps its
-// particle, deflected (provisional).
-fn contract_resolve(origin: ptr<function, State>, d: u32, is_accepted: bool, bits: u32) {
-    if is_accepted {
-        *origin = holding(VACUUM);
-    } else {
-        (*origin).velocity = deflected((*origin).material, (*origin).velocity, d, bits);
-    }
+// `Effect::Receive`: the particle arrives from the origin toward d, with gravity's impulse, and the
+// verdict names that origin.
+fn receive(live: ptr<function, State>, d: u32, origin: State) {
+    (*live).material = origin.material;
+    (*live).velocity = moved(origin.material, origin.velocity);
+    (*live).accept = d + 1u;
 }
 
-// `contract::deflected`, provisional: the rejection effect. The velocity turns away from d,
-// perpendicular to it, by the material's deflection, to the side it already leans (or the side bits
-// picks when dead on), then back to the steady scale.
-fn deflected(m: u32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
-    var k = 0u;
-    if m == AIR {
-        k = params.deflect_air;
-    } else if m == WATER {
-        k = params.deflect_water;
-    } else if m == SAND {
-        k = params.deflect_sand;
-    }
-    let ki = i32(min(k, DEFLECT_CAP));
-    if ki == 0 {
+// `Effect::Deflect`: the particle stays, its intent turned away from the target toward d by its
+// material's deflection.
+fn deflect(live: ptr<function, State>, d: u32, bits: u32) {
+    (*live).velocity = deflected(i32(deflection((*live).material)), (*live).velocity, d, bits);
+}
+
+// `contract::deflected`: v turned away from d by k, perpendicular to it, to the side it already
+// leans (or the side bits picks when dead on), then back to the steady scale.
+fn deflected(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
+    if k == 0 {
         return v;
     }
     let s = step_of(d);
@@ -283,7 +266,7 @@ fn deflected(m: u32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
     if lean > 0 || (lean == 0 && (bits & 1u) == 1u) {
         side = 1;
     }
-    return steady(vec2(v.x - side * ki * s.y / 2, v.y + side * ki * s.x / 2));
+    return steady(vec2(v.x - side * k * s.y / 2, v.y + side * k * s.x / 2));
 }
 
 // Selection (`selection::select`): 1 + the index chosen, or 0 when every weight is zero.
@@ -316,7 +299,11 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // Resolve: the offer kept back has its verdict now; apply the contract's effect on its origin.
     if kept.offer != 0u {
         let d = kept.offer - 1u;
-        contract_resolve(&live, d, accepted(d, (*seen)[d]), hash(x, y, phase, SALT_DEFLECT));
+        if accepted(d, (*seen)[d]) {
+            release(&live);
+        } else {
+            deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
+        }
     }
 
     // Evaluate: the offers that target me, excluded unless the physics distribution entertains them,
@@ -332,19 +319,20 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
         }
         let i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE));
         if i != 0u {
-            contract_accept(&live, (*seen)[i - 1u], i - 1u);
+            receive(&live, i - 1u, (*seen)[i - 1u]);
         }
     }
 
     // Evolve: no natural contracts yet.
 
     // Publish, then propose, in one write (see `update::next`).
-    // Propose: from the six neighbors, exclude the incompatible, select among the rest, weighted.
+    // Propose: from the six neighbors, exclude those it wouldn't offer to, select among the rest,
+    // weighted.
     if !committed {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
             let dest = (*seen)[d].material;
-            if compatible(live.material, dest) {
+            if offers_to(live.material, live.velocity, d, dest) {
                 weights[d] = weight(live.material, live.velocity, d, dest);
             }
         }

@@ -4,13 +4,18 @@
 //! verdict. It deals in resources and capacities, never creates or loses any, and each end
 //! applies its effects to itself only.
 //!
-//! A contract has **conditions**, which decide which of its **effects** each end applies:
-//! - **Accepted:** the particle moves. The target takes it, with gravity's impulse (it made a
-//!   physical move), and the origin is left holding nothing.
-//! - **Rejected:** the particle stays with the origin. Provisionally, its velocity is deflected.
+//! A contract's **terms** pair each of its **conditions** with the **effects** each end applies.
+//! For an offer of a particle, the condition is the verdict (`Offer::terms`):
+//!
+//! | Condition | Effect on the origin | Effect on the target |
+//! |---|---|---|
+//! | Accepted | `Release`: holds nothing | `Receive`: holds the particle, with gravity's impulse |
+//! | Rejected | `Deflect`: keeps the particle; its intent turns away from the target | none |
 //!
 //! Which offers a target entertains at all is the physics distribution's to say
-//! (`Physics::entertains`), not the contract's.
+//! (`Physics::entertains`), not the contract's. How much an effect does is the materials' data
+//! (`physics::Properties`): a rejected sand particle deflects a little (forced on down a hill),
+//! water a lot (it spreads on collision). Deflection is a first cut, to iterate on.
 //!
 //! Only **offers** are built so far: contracts authored by the origin, which pre-commit the particle
 //! they propose to transfer. The doc's **requests** (authored by the target, reserving its capacity)
@@ -28,59 +33,81 @@
 //! While the particle is in transport, both cells register as holding it; a census counts it once,
 //! at its origin (`State::counts_as`).
 
-use crate::{Dir, Material, Physics, State, Velocity};
+use crate::{Dir, Physics, State, Velocity};
 
-/// The verdict on a contract, as its author reads it.
+/// An offer: a contract its origin authors, to transfer its particle to the neighbor `toward`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Offer {
+    pub toward: Dir,
+}
+
+/// A contract's condition: the verdict on it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
     Accepted,
     Rejected,
 }
 
-/// Whether `me` has an offer out: its particle is committed to it, so the cell neither evaluates
-/// nor proposes until the offer resolves.
-pub fn committed(me: State) -> bool {
-    me.offer.is_some()
+/// What one end of a contract applies to itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Effect {
+    /// Nothing changes.
+    None,
+    /// The particle leaves: the cell holds nothing.
+    Release,
+    /// The particle arrives from the origin `from`, having made a physical move: gravity's impulse
+    /// is applied to its velocity. The cell's verdict names that origin.
+    Receive { from: Dir, origin: State },
+    /// The particle stays, and its intent turns away from the target `from`, perpendicular to it, by
+    /// its material's deflection: to the side it already leans or, pointing dead on, to the side
+    /// `bits` picks.
+    Deflect { from: Dir, bits: u32 },
 }
 
-/// The verdict on an offer toward `d`, read from the target's published state: accepted if it names
-/// this cell, rejected otherwise.
-pub fn verdict(d: Dir, target: State) -> Verdict {
-    if target.accept == Some(d.opposite()) { Verdict::Accepted } else { Verdict::Rejected }
-}
+impl Offer {
+    /// The offer a cell has out, if any: its particle is committed to it, so the cell neither
+    /// evaluates nor proposes until the offer resolves.
+    pub fn of(me: State) -> Option<Offer> {
+        me.offer.map(|toward| Offer { toward })
+    }
 
-/// The offer's effect on its target, on acceptance: the particle from the origin toward `from`
-/// arrives with gravity's impulse, and the target's verdict names that origin.
-pub fn accept(target: &mut State, origin: State, from: Dir, physics: &Physics) {
-    target.material = origin.material;
-    target.velocity = physics.moved(origin.material, origin.velocity);
-    target.accept = Some(from);
-}
+    /// The verdict, as the origin reads it from the target's published state: accepted if the
+    /// target names this cell, rejected otherwise.
+    pub fn verdict(self, target: State) -> Verdict {
+        if target.accept == Some(self.toward.opposite()) { Verdict::Accepted } else { Verdict::Rejected }
+    }
 
-/// The offer's effect on its origin, at resolve. Accepted: the particle has left, and the origin
-/// holds nothing. Rejected: the origin keeps its particle, deflected (provisional).
-pub fn resolve(origin: &mut State, d: Dir, verdict: Verdict, bits: u32, physics: &Physics) {
-    match verdict {
-        Verdict::Accepted => *origin = State::VACUUM,
-        Verdict::Rejected => origin.velocity = deflected(physics, origin.material, origin.velocity, d, bits),
+    /// The terms: the effects on (origin, target) under each condition. `origin` is the origin's
+    /// published state, which the target reads; `bits` are the origin's random bits.
+    pub fn terms(self, verdict: Verdict, origin: State, bits: u32) -> (Effect, Effect) {
+        match verdict {
+            Verdict::Accepted => (Effect::Release, Effect::Receive { from: self.toward.opposite(), origin }),
+            Verdict::Rejected => (Effect::Deflect { from: self.toward, bits }, Effect::None),
+        }
     }
 }
 
-const DEFLECT_CAP: u32 = 1 << 10;
-
-/// Provisional: the rejection effect. A stand-in within the model that lets a rejected particle
-/// change its intent: its velocity turns away from the target `d`, perpendicular to it, by its
-/// material's deflection, to the side it already leans (or, pointing dead on, to the side `bits`
-/// picks), then back to the steady scale. Every rejection gets this same effect, whatever the
-/// reason for it.
-pub fn deflected(physics: &Physics, m: Material, v: Velocity, d: Dir, bits: u32) -> Velocity {
-    let k = match m {
-        Material::Air => physics.deflect_air,
-        Material::Water => physics.deflect_water,
-        Material::Sand => physics.deflect_sand,
-        _ => 0,
+impl Effect {
+    /// Apply this effect to the cell's own live state.
+    pub fn apply(self, live: &mut State, physics: &Physics) {
+        match self {
+            Effect::None => {}
+            Effect::Release => *live = State::VACUUM,
+            Effect::Receive { from, origin } => {
+                live.material = origin.material;
+                live.velocity = physics.moved(origin.material, origin.velocity);
+                live.accept = Some(from);
+            }
+            Effect::Deflect { from, bits } => {
+                live.velocity = deflected(physics.deflection(live.material) as i32, live.velocity, from, bits)
+            }
+        }
     }
-    .min(DEFLECT_CAP) as i32;
+}
+
+/// The deflected velocity: `v` turned away from `d` by `k`, perpendicular to `d`, to the side it
+/// already leans (or, dead on, the side `bits` picks), then back to the steady scale.
+pub fn deflected(k: i32, v: Velocity, d: Dir, bits: u32) -> Velocity {
     if k == 0 {
         return v;
     }
