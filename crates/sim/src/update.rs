@@ -12,7 +12,7 @@
 //! contracts it just proposed, so neighbors read them together at the next phase.
 
 use crate::physics::select;
-use crate::{Dir, Material, Physics, State, Velocity, hash};
+use crate::{Dir, Material, Physics, State, hash};
 
 /// Salts for the selections, so they draw independent random bits.
 pub const SALT_EVALUATE: u32 = 1;
@@ -24,7 +24,7 @@ pub const SALT_PROPOSE: u32 = 2;
 #[allow(clippy::too_many_arguments)]
 pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32, physics: &Physics) -> State {
     // Read: `seen` is the neighbors' published state; the live state starts as my own.
-    let mut live = State { offer: None, accept: None, ..me };
+    let mut live = State { offer: None, accept: None, grant: false, ..me };
     // An offer I published this phase is evaluated this phase; its particle stays committed.
     let committed = me.offer.is_some();
 
@@ -41,30 +41,32 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
 }
 
 /// Resolve: the offer I published last phase has its verdict now, in the neighbor's acceptance.
-/// Accepted, the particle has moved and I am granted an air. Rejected, I keep my particle and its
-/// velocity.
+/// Accepted, the particle has moved: I am left vacuum, or granted an air if it overwrote one.
+/// Rejected, I keep my particle and its velocity.
 fn resolve(live: &mut State, kept: State, seen: &[State; 6]) {
     let Some(d) = kept.offer else { return };
-    if seen[d as usize].accept == Some(d.opposite()) {
-        live.material = Material::Air;
-        live.velocity = Velocity::ZERO;
+    let verdict = seen[d as usize];
+    if verdict.accept == Some(d.opposite()) {
+        *live = State::holding(if verdict.grant { Material::Air } else { Material::Vacuum });
     }
 }
 
 /// Evaluate: every offer that targets me, selected one at a time biased by the physics
-/// distribution. The first whose conditions hold (I hold air, and its particle overwrites air) is
-/// accepted: its particle moves in, with gravity's impulse. My capacity is then filled, so the
-/// conditions of the rest fail and they are rejected, by not being named.
+/// distribution (heavier particles and better-aligned moves first). The first whose conditions
+/// hold is accepted: its particle moves in, with gravity's impulse, overwriting an air (granting
+/// one to its origin) or filling vacuum. My capacity is then filled, so the conditions of the rest
+/// fail and they are rejected, by not being named.
 fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
     for d in Dir::ALL {
         let origin = seen[d as usize];
-        if origin.offer == Some(d.opposite()) && physics.overwrites(origin.material, live.material) {
-            weights[d as usize] = physics.weight(origin.velocity, d.opposite(), live.material).max(1);
+        if origin.offer == Some(d.opposite()) && physics.accepts(origin.material, live.material) {
+            weights[d as usize] = physics.weight(origin.material, origin.velocity, d.opposite(), live.material).max(1);
         }
     }
     let Some(i) = select(&weights, hash(x, y, phase, SALT_EVALUATE)) else { return };
     let origin = seen[i];
+    live.grant = live.material == Material::Air;
     live.material = origin.material;
     live.velocity = physics.moved(origin.material, origin.velocity);
     live.accept = Some(Dir::ALL[i]);
@@ -81,7 +83,7 @@ fn propose(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phys
     for d in Dir::ALL {
         let target = seen[d as usize].material;
         if physics.compatible(live.material, target) {
-            weights[d as usize] = physics.weight(live.velocity, d, target);
+            weights[d as usize] = physics.weight(live.material, live.velocity, d, target);
         }
     }
     live.offer = select(&weights, hash(x, y, phase, SALT_PROPOSE)).map(|i| Dir::ALL[i]);

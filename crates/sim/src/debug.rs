@@ -5,7 +5,7 @@
 //! a line lower, so the column-offset hex lattice keeps its true geometry: a level surface reads
 //! level, and a diagonal reads as a staircase of half steps.
 //!
-//! Glyphs: `.` air, `:` sand, `@` bedrock.
+//! Glyphs: `.` air, `:` sand, `@` bedrock, `o` vacuum.
 //!
 //! ```text
 //!      012
@@ -24,6 +24,7 @@ pub fn glyph(material: Material) -> char {
         Material::Air => '.',
         Material::Sand => ':',
         Material::Bedrock => '@',
+        Material::Vacuum => 'o',
     }
 }
 

@@ -161,10 +161,10 @@ impl Lattice {
             p.gravity,
             p.mass_air,
             p.mass_sand,
-            p.restless,
-            p.align,
             p.into_air,
             p.into_sand,
+            p.into_vacuum,
+            0,
             0,
         ];
         queue.write_buffer(&self.params, 0, &words(&params));
@@ -328,6 +328,9 @@ mod tests {
                 if sim::hash(x, y, 0, 77).is_multiple_of(3) {
                     world.paint(x, y, Material::Sand);
                 }
+                if sim::hash(x, y, 0, 78).is_multiple_of(9) {
+                    world.paint(x, y, Material::Vacuum);
+                }
             }
         }
         let lattice = Lattice::new(&device, &pipelines, &world);
@@ -372,6 +375,7 @@ mod tests {
             Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },
             Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Air },
             Stamp { x: 10.0, y: 10.0, radius: 3.5, material: Material::Air },
+            Stamp { x: 40.0, y: 30.0, radius: 4.5, material: Material::Vacuum },
             Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Sand },
         ];
         for s in &stamps {
