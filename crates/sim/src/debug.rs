@@ -16,7 +16,7 @@
 //!       .
 //! ```
 
-use crate::{Material, State, World};
+use crate::{Material, State, WORDS, World};
 
 /// The character a material draws as.
 pub fn glyph(material: Material) -> char {
@@ -63,8 +63,9 @@ impl World {
 pub fn diff(want: &World, got: &World) -> Option<String> {
     assert_eq!((want.width(), want.height()), (got.width(), got.height()), "same lattice size");
     let (w, h) = (want.width(), want.height());
-    let differs: Vec<usize> =
-        (0..(w * h) as usize).filter(|&i| want.words()[2 * i..2 * i + 2] != got.words()[2 * i..2 * i + 2]).collect();
+    let differs: Vec<usize> = (0..(w * h) as usize)
+        .filter(|&i| want.words()[WORDS * i..WORDS * (i + 1)] != got.words()[WORDS * i..WORDS * (i + 1)])
+        .collect();
     let first = *differs.first()?;
     let (x, y) = (first as i32 % w, first as i32 / w);
     let mut marked = World::new(w, h);
