@@ -376,7 +376,7 @@ mod tests {
             }
         }
 
-        // The brush: matter only into vacuum, erasing anything but bedrock, in order.
+        // The brush: a particle only into a cell holding nothing, erasing anything but bedrock, in order.
         let stamps = [
             Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Sand },
             Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },

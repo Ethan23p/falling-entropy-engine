@@ -3,6 +3,7 @@
 //! randomness, synchrony, conservation, the brush, the encoding).
 
 use crate::update::next;
+use crate::world::STATE_MASK;
 use crate::*;
 
 /// A scattering of sand over the top half: a deterministic pseudo-random fill.
@@ -161,8 +162,8 @@ fn synchrony_a_ragged_front_of_phases_gives_the_same_world() {
 
 #[test]
 fn conservation_the_census_never_changes() {
-    // A particle moves only into vacuum and leaves vacuum behind. Every count holds, measured on published state with each particle in transport
-    // counted once.
+    // Contracts never create or lose a particle. Every count holds, measured on published state with
+    // each particle in transport counted once.
     let mut w = scattered(20, 16);
     for i in 0..12 {
         w.paint(3 + i, 4, Material::Air);
@@ -466,6 +467,17 @@ fn evaluate_air_and_water_reject_every_offer() {
 }
 
 #[test]
+fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
+    // The capacity limit: one particle per cell. Only a cell holding nothing entertains an offer.
+    let p = Physics::default();
+    for holding in Material::ALL {
+        for offered in [Material::Air, Material::Water, Material::Sand] {
+            assert_eq!(p.entertains(offered, holding), holding == Material::Vacuum, "{offered:?} into {holding:?}");
+        }
+    }
+}
+
+#[test]
 fn gravity_is_an_impulse_on_each_move_turning_velocity_down() {
     let p = Physics::default();
     // A particle intending to move right that moves turns toward down, at the steady scale.
@@ -498,7 +510,7 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..sand(DOWN) })]);
     let s = next(sand(v), kept, seen, 2, 2, 0, &p);
     assert_eq!(s.material, Material::Sand);
-    assert_eq!(s.velocity, p.deflected(Material::Sand, v, Dir::Down, 0));
+    assert_eq!(s.velocity, contract::deflected(&p, Material::Sand, v, Dir::Down, 0));
     assert!(s.velocity.x > v.x && s.velocity.y == 256, "{:?}", s.velocity);
     assert!(s.offer.is_some());
 }
@@ -509,22 +521,25 @@ fn deflection_turns_away_to_the_side_it_leans_or_the_hash_picks() {
     // Leaning right, a rejection below turns it further right, whatever the bits.
     let v = Velocity { x: 10, y: 256 };
     for bits in [0, 1] {
-        assert!(p.deflected(Material::Water, v, Dir::Down, bits).x > 10);
+        assert!(contract::deflected(&p, Material::Water, v, Dir::Down, bits).x > 10);
     }
     // Dead on, the bits pick the side.
-    let (a, b) = (p.deflected(Material::Water, DOWN, Dir::Down, 0), p.deflected(Material::Water, DOWN, Dir::Down, 1));
+    let (a, b) = (
+        contract::deflected(&p, Material::Water, DOWN, Dir::Down, 0),
+        contract::deflected(&p, Material::Water, DOWN, Dir::Down, 1),
+    );
     assert!(a.x * b.x < 0, "{a:?} {b:?}");
     // Water deflects more than sand; a material with no deflection keeps its velocity.
     assert!(
-        p.deflected(Material::Water, DOWN, Dir::Down, 1).x.abs()
-            > p.deflected(Material::Sand, DOWN, Dir::Down, 1).x.abs()
+        contract::deflected(&p, Material::Water, DOWN, Dir::Down, 1).x.abs()
+            > contract::deflected(&p, Material::Sand, DOWN, Dir::Down, 1).x.abs()
     );
     let none = Physics { deflect_sand: 0, ..p };
-    assert_eq!(none.deflected(Material::Sand, v, Dir::Down, 1), v);
+    assert_eq!(contract::deflected(&none, Material::Sand, v, Dir::Down, 1), v);
     // Repeated rejections keep turning it, toward sideways.
     let mut w = DOWN;
     for _ in 0..20 {
-        w = p.deflected(Material::Water, w, Dir::Down, 1);
+        w = contract::deflected(&p, Material::Water, w, Dir::Down, 1);
     }
     assert!(w.x.abs() >= w.y.abs(), "{w:?}");
 }
@@ -697,7 +712,7 @@ fn propose_water_still_prefers_down() {
 
 #[test]
 fn evaluate_water_rejects_sand_nothing_is_swapped_or_displaced() {
-    // Sand may offer into water, but water is matter: evaluate rejects it.
+    // Sand may offer into water (its intent), but a cell holding a particle rejects every offer of one.
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(water(DOWN), State::AIR, seen, 2, 2, 0, &Physics::default());
     assert_eq!((s.material, s.accept), (Material::Water, None));
@@ -725,7 +740,7 @@ fn movement_sand_rests_on_water_and_water_never_climbs() {
 }
 
 #[test]
-fn movement_air_is_a_ball_and_falls_in_vacuum() {
+fn movement_air_is_a_very_light_particle_and_falls_in_vacuum() {
     // All particles feel gravity: a cloud of air in empty space settles to the floor.
     let mut w = World::new(16, 16);
     w.stamp(8.0, 4.0, 3.0, Material::Air);

@@ -1,39 +1,43 @@
-//! The physics distribution: the overlay on selection that evaluate and propose apply. It
-//! excludes the options whose conditions the particles' materials can't meet, and biases the
-//! weights of the rest from the hosted particle's velocity, its mass, and what the other cell holds.
+//! The physics distribution: the overlay on selection that evaluate and propose apply. It holds
+//! only universal truths: constants (the tunables below) and pure functions of a cell's live state
+//! and its neighbors' published state. It excludes options and biases the weights of the rest. It
+//! changes no state itself: a cell's state changes only through a contract's effects (`contract`),
+//! which may draw on the truths here, such as gravity.
 //!
-//! The policies so far:
-//! - **Movement**: a cell hosting a particle proposes to move it toward a neighbor, weighted by
-//!   how well that direction lines up with the particle's velocity: its intent to move. Velocity
-//!   is basically a direction for now, at a steady scale (`Velocity::SCALE`).
+//! What it holds so far:
+//! - **Capacity** (the hard limit in evaluate): a cell holds one particle at most, so a cell holding
+//!   a particle rejects every offer of a particle. A cell holding nothing can take one.
+//! - **Movement** (propose): a particle intends to move along its velocity. From the six neighbors,
+//!   propose excludes those whose published state is incompatible with the particle and weights the
+//!   rest by how well they line up with the velocity, by the particle's mass, and by what the
+//!   neighbor holds (vacuum and air most amenable, then water, then sand).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
-//!   mass, turning the velocity toward down. New particles start out intending to move down.
-//! - **Vacuum** is empty capacity, and most of a ball pit: a particle moves only into vacuum, and
-//!   leaves vacuum behind. Evaluate favors heavier particles. Nothing is overwritten, swapped or
-//!   displaced. A particle may still offer into a cell holding another (air, water or sand, each
-//!   weighted), which evaluate rejects.
-//! - **Slate** is static, like bedrock: nothing offers into it.
-//! - **Deflection**: the effect of a rejected offer on its origin. The particle's velocity turns a
-//!   little away from the cell that refused it, to the side its velocity already leans (or, dead on,
-//!   to a side the hash picks), by its material's deflection.
+//!   mass, turning it toward down (`moved`).
+//!
+//! Provisional, marked where they live: the hard 90° cutoff on direction in `weight`, and every
+//! material sharing one directional profile.
 
 use crate::{Dir, Material, Velocity};
 
-/// The tunables of the physics distribution. All integers, so the shaders match bit for bit.
+/// The tunables of the physics distribution: constants, all integers so the shaders match bit for
+/// bit. They include the deflection constants that the provisional rejection effect reads
+/// (`contract::deflected`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Physics {
     /// Gravity's impulse per unit of mass, in velocity units (`Velocity::SCALE` is one cell per move).
     pub gravity: u32,
-    /// Each material's mass: air, water, sand. Vacuum has none; slate and bedrock are static.
+    /// Each material's mass: air (very low), water (low), sand (mid). Vacuum is nothing and has none.
+    /// Slate and bedrock are static; their masses (high, very high) aren't read by any rule yet.
     pub mass_air: u32,
     pub mass_water: u32,
     pub mass_sand: u32,
-    /// The weight multiplier for a neighbor holding air, water, sand or vacuum.
+    /// The weight multiplier for proposing into a neighbor holding air, water, sand or vacuum.
     pub into_air: u32,
     pub into_water: u32,
     pub into_sand: u32,
     pub into_vacuum: u32,
-    /// Each material's deflection: how far a rejection turns its velocity, in velocity units.
+    /// Each material's deflection, for the provisional rejection effect: how far a rejection turns
+    /// its velocity, in velocity units.
     pub deflect_air: u32,
     pub deflect_water: u32,
     pub deflect_sand: u32,
@@ -62,7 +66,6 @@ const FACTOR_CAP: u32 = 255;
 const MASS_CAP: u32 = 16;
 /// The largest `along` counts for: a steady-scale velocity reaches at most 3 * `SCALE`.
 const ALONG_CAP: u32 = 1 << 10;
-const DEFLECT_CAP: u32 = 1 << 10;
 
 impl Physics {
     pub fn mass(&self, m: Material) -> u32 {
@@ -74,21 +77,27 @@ impl Physics {
         }
     }
 
-    /// Whether a particle of `origin` may offer into a cell holding `target` at all: the exclusion
-    /// step. Only air, water and sand move; they offer into vacuum, or into another such particle
-    /// whose weight multiplier isn't zero; nothing offers into slate or bedrock.
+    /// Propose's exclusion: whether a particle of `origin` may offer into a neighbor whose published
+    /// state holds `target`. Only particles that move offer. They may offer into a neighbor holding
+    /// nothing, or holding another particle that moves (whose weight multiplier isn't zero), since
+    /// that neighbor may have changed by the time it evaluates. Nothing offers into a static particle.
     pub fn compatible(&self, origin: Material, target: Material) -> bool {
         origin.moves() && (target == Material::Vacuum || (target.moves() && self.factor(target) > 0))
     }
 
-    /// Evaluate's conditions: whether a particle of `origin` may move into a cell holding `target`.
-    /// Only into vacuum.
-    pub fn accepts(&self, origin: Material, target: Material) -> bool {
-        origin.moves() && target == Material::Vacuum
+    /// Evaluate's exclusion, the capacity limit: whether a cell whose live state holds `holding`
+    /// entertains an offer of a particle of `offered`. A cell holds one particle at most: holding a
+    /// particle, it rejects every offer of one; holding nothing, it can take one.
+    pub fn entertains(&self, offered: Material, holding: Material) -> bool {
+        offered.moves() && !holding.is_particle()
     }
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding
-    /// `target`: zero away from the velocity, growing as the square of how far it points that way.
+    /// `target`: growing as the square of how far the move points along the velocity, times the
+    /// particle's mass, times what the target holds.
+    ///
+    /// Provisional: anything at or behind 90° from the velocity weighs zero, for every material.
+    /// The doc has a backward move only unlikely, and lets air be more permissive than sand.
     pub fn weight(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> u32 {
         let factor = self.factor(target);
         let along = (velocity.along(d).max(0) as u32).min(ALONG_CAP);
@@ -107,52 +116,10 @@ impl Physics {
         .min(FACTOR_CAP)
     }
 
-    pub fn deflection(&self, m: Material) -> u32 {
-        match m {
-            Material::Air => self.deflect_air,
-            Material::Water => self.deflect_water,
-            Material::Sand => self.deflect_sand,
-            _ => 0,
-        }
-        .min(DEFLECT_CAP)
-    }
-
-    /// The velocity of a particle of `m` whose offer toward `d` was rejected: turned away from `d`,
-    /// perpendicular to it, by `m`'s deflection, to the side the velocity already leans, or when it
-    /// points dead on, to the side `bits` picks; then back to the steady scale.
-    pub fn deflected(&self, m: Material, v: Velocity, d: Dir, bits: u32) -> Velocity {
-        let k = self.deflection(m) as i32;
-        if k == 0 {
-            return v;
-        }
-        let (sx, sy) = d.step();
-        // The perpendicular (-sy, sx), and how far the velocity already leans along it.
-        let lean = -(v.x as i32) * sy + v.y as i32 * sx;
-        let side = if lean > 0 || (lean == 0 && bits & 1 == 1) { 1 } else { -1 };
-        Velocity::steady(v.x as i32 - side * k * sy / 2, v.y as i32 + side * k * sx / 2)
-    }
-
-    /// The velocity of a particle of `m` that just moved: gravity's impulse added, then brought back
-    /// to the steady scale, keeping its direction.
+    /// Gravity: the velocity of a particle of `m` that just moved, with gravity's impulse added,
+    /// then brought back to the steady scale.
     pub fn moved(&self, m: Material, v: Velocity) -> Velocity {
         let impulse = (self.gravity.min(1 << 12) * self.mass(m).min(MASS_CAP)) as i32;
         Velocity::steady(v.x as i32, v.y as i32 + impulse)
     }
-}
-
-/// Weighted selection: the option whose running total of weights first passes `bits` mod the
-/// total. Returns its index, or `None` when every weight is zero.
-pub fn select(weights: &[u32; 6], bits: u32) -> Option<usize> {
-    let total: u32 = weights.iter().sum();
-    if total == 0 {
-        return None;
-    }
-    let mut r = bits % total;
-    for (i, &w) in weights.iter().enumerate() {
-        if r < w {
-            return Some(i);
-        }
-        r -= w;
-    }
-    None
 }
