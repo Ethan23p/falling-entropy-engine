@@ -134,6 +134,7 @@ fn strip(args: &[String]) -> Result<(), String> {
 
     for &scene in &a.scenes {
         let mut run = Run::new(scene, a.size.0, a.size.1);
+        run.world.physics = tuner.current.physics();
         let mut times: Vec<(u32, f32)> = a.at.iter().map(|&t| ((t * rate).round() as u32, t)).collect();
         times.sort_by_key(|&(p, _)| p);
         let default_end = if a.when.is_empty() { 0.0 } else { 30.0 };

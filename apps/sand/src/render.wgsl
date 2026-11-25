@@ -13,15 +13,16 @@ struct View {
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<storage, read> cells: array<u32>;
 
-// A word: the state (bits 0-18) and its phase (bits 19-31); see sim.wgsl.
+// Four words a cell; the first two are its state words: the state (bits 0-18) and its phase
+// (bits 19-31). See sim.wgsl.
 const STATE_BITS: u32 = 19u;
 const PHASE_MASK: u32 = 0x1fffu;
 
 // The index of cell i's current word, of the two it keeps: the one tagged with the later phase.
 fn current(i: i32) -> i32 {
-    let even = cells[2 * i] >> STATE_BITS;
-    let odd = cells[2 * i + 1] >> STATE_BITS;
-    return select(2 * i + 1, 2 * i, ((even - odd) & PHASE_MASK) == 1u);
+    let even = cells[4 * i] >> STATE_BITS;
+    let odd = cells[4 * i + 1] >> STATE_BITS;
+    return select(4 * i + 1, 4 * i, ((even - odd) & PHASE_MASK) == 1u);
 }
 
 // Outside the lattice is bedrock, so it draws as bedrock.

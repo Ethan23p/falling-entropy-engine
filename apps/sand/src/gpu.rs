@@ -111,7 +111,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 16);
+        let params = uniform("params", 48);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -148,10 +148,25 @@ impl Lattice {
         pipelines: &Pipelines,
         encoder: &mut wgpu::CommandEncoder,
         stamps: &[Stamp],
+        physics: &sim::Physics,
         phases: u32,
     ) {
         let stamps = &stamps[stamps.len().saturating_sub(MAX_STAMPS)..];
-        let params = [self.width as u32, self.height as u32, stamps.len() as u32, 0];
+        let p = physics;
+        let params = [
+            self.width as u32,
+            self.height as u32,
+            stamps.len() as u32,
+            p.sand_into_air as u32,
+            p.gravity,
+            p.mass_air,
+            p.mass_sand,
+            p.restless,
+            p.align,
+            p.into_air,
+            p.into_sand,
+            0,
+        ];
         queue.write_buffer(&self.params, 0, &words(&params));
         let (gx, gy) = self.groups();
         if !stamps.is_empty() {
@@ -225,7 +240,7 @@ impl Readback {
     pub fn new(device: &wgpu::Device, lattice: &Lattice) -> Self {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: (lattice.width * lattice.height * 8) as u64,
+            size: (lattice.width * lattice.height * 4 * sim::WORDS as i32) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -318,7 +333,7 @@ mod tests {
         let lattice = Lattice::new(&device, &pipelines, &world);
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: (w * h * 8) as u64,
+            size: (w * h * 4 * sim::WORDS as i32) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -326,8 +341,8 @@ mod tests {
         let mut phase = 0;
         for chunk in [1, 1, 1, 7, 40, 150] {
             let mut encoder = device.create_command_encoder(&Default::default());
-            lattice.simulate(&queue, &pipelines, &mut encoder, &[], chunk);
-            encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 8) as u64);
+            lattice.simulate(&queue, &pipelines, &mut encoder, &[], &world.physics, chunk);
+            encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4 * sim::WORDS as i32) as u64);
             queue.submit([encoder.finish()]);
             for _ in 0..chunk {
                 world.step();
@@ -366,8 +381,8 @@ mod tests {
             world.step();
         }
         let mut encoder = device.create_command_encoder(&Default::default());
-        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, 30);
-        encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 8) as u64);
+        lattice.simulate(&queue, &pipelines, &mut encoder, &stamps, &world.physics, 30);
+        encoder.copy_buffer_to_buffer(&lattice.cells, 0, &readback, 0, (w * h * 4 * sim::WORDS as i32) as u64);
         queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));

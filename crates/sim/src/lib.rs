@@ -1,13 +1,17 @@
 //! The CPU reference simulation. Every rule lives here first, in plain Rust, and is tested
 //! natively; the WGSL compute shaders mirror it bit for bit.
 //!
-//! v01.00 starts from scaffolding: a column-offset hexagonal lattice of cells, each holding air,
-//! sand or bedrock, advanced by a synchronizer (a cell updates and advances a phase only once every
-//! neighbor has reached its phase), reading only its neighbors' published state and writing only
-//! itself. The update has no stages yet: a cell publishes what it held. The model (particles,
-//! contracts, the physics distribution) is built on this one piece at a time.
+//! A column-offset hexagonal lattice of cells, advanced by a synchronizer (a cell updates and
+//! advances a phase only once every neighbor has reached its phase). Each cell holds one particle
+//! (air, sand or bedrock, with a velocity) and its contracts, reads only its neighbors' published
+//! state and writes only itself. The update's stages are in `update`; the physics distribution
+//! that biases selection is in `physics`.
 
 pub mod debug;
+pub mod physics;
+mod update;
+
+pub use physics::Physics;
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +34,19 @@ impl Dir {
 
     pub fn opposite(self) -> Dir {
         Dir::ALL[(self as usize + 3) % 6]
+    }
+
+    /// The step toward this neighbor, in half cells, `y` growing downward: what velocity is
+    /// measured against. Up and down are 2 long; the diagonals 2 across and 1 up or down.
+    pub fn step(self) -> (i32, i32) {
+        match self {
+            Dir::Up => (0, -2),
+            Dir::UpRight => (2, -1),
+            Dir::DownRight => (2, 1),
+            Dir::Down => (0, 2),
+            Dir::DownLeft => (-2, 1),
+            Dir::UpLeft => (-2, -1),
+        }
     }
 }
 
@@ -75,78 +92,128 @@ pub enum Material {
     Bedrock = 2,
 }
 
-/// What a cell publishes at a phase.
+/// A particle's velocity: its intent to move, a magnitude and a direction finer than the six
+/// sides of a hexagon. In units where 256 is one cell per move, `y` growing downward.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Velocity {
+    pub x: i16,
+    pub y: i16,
+}
+
+impl Velocity {
+    pub const ZERO: Velocity = Velocity { x: 0, y: 0 };
+
+    /// How far this points toward `d`: the dot product with `d`'s step (see `Dir::step`).
+    pub fn along(self, d: Dir) -> i32 {
+        let (dx, dy) = d.step();
+        self.x as i32 * dx + self.y as i32 * dy
+    }
+
+    pub fn encode(self) -> u32 {
+        self.x as u16 as u32 | (self.y as u16 as u32) << 16
+    }
+
+    pub fn decode(bits: u32) -> Velocity {
+        Velocity { x: bits as u16 as i16, y: (bits >> 16) as u16 as i16 }
+    }
+}
+
+/// What a cell publishes at a phase: the particle it holds, and its contracts.
+///
+/// - `offer`: an offer this cell proposed in its last update, to move its particle to the
+///   neighbor toward that direction. The neighbor evaluates it in its next update, and this cell
+///   resolves it in the update after, reading the verdict. Meanwhile the particle is committed.
+/// - `accept`: the verdict on an offer from the neighbor toward that direction, accepted in this
+///   cell's last update; every other offer that targeted this cell then was rejected. The particle
+///   held here is in transport until that neighbor resolves.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
     pub material: Material,
+    pub velocity: Velocity,
+    pub offer: Option<Dir>,
+    pub accept: Option<Dir>,
 }
 
 impl State {
-    pub const AIR: State = State { material: Material::Air };
-    pub const BEDROCK: State = State { material: Material::Bedrock };
+    pub const AIR: State = State::holding(Material::Air);
+    pub const BEDROCK: State = State::holding(Material::Bedrock);
 
-    pub fn holding(material: Material) -> State {
-        State { material }
+    /// A particle at rest, with no contracts.
+    pub const fn holding(material: Material) -> State {
+        State { material, velocity: Velocity::ZERO, offer: None, accept: None }
     }
 
-    /// The material in bits 0-1. The rest of the state's bits are free for the model.
+    /// Bits 0-1 the material, 2-4 the offer and 5-7 the acceptance (1 + a direction, or 0 for
+    /// none). The velocity has a word of its own (`Velocity::encode`).
     pub fn encode(self) -> u32 {
-        self.material as u32
+        let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
+        self.material as u32 | dir(self.offer) << 2 | dir(self.accept) << 5
     }
 
-    pub fn decode(bits: u32) -> State {
+    pub fn decode(bits: u32, velocity: u32) -> State {
         let material = match bits & 3 {
             0 => Material::Air,
             1 => Material::Sand,
             _ => Material::Bedrock,
         };
-        State { material }
+        let dir = |b: u32| match b & 7 {
+            0 | 7 => None,
+            n => Some(Dir::ALL[n as usize - 1]),
+        };
+        State { material, velocity: Velocity::decode(velocity), offer: dir(bits >> 2), accept: dir(bits >> 5) }
+    }
+
+    /// What the cell counts as holding in a census of published state: a particle accepted this
+    /// phase is still in transport (its origin counts it until it resolves), so the cell counts
+    /// as the air it overwrote.
+    pub fn counts_as(self) -> Material {
+        if self.accept.is_some() { Material::Air } else { self.material }
     }
 }
 
 // The update
 
-/// One cell's update: its next state from its own state, the state it kept back from the phase
-/// before, and its neighbors' published state, all at the same phase (outside the lattice reads as
-/// bedrock). The cell computes only itself. No stages yet: it publishes what it held.
-pub fn next(me: State, _kept: State, _seen: [State; 6], _x: i32, _y: i32, _phase: u32) -> State {
-    me
-}
+pub use update::next;
 
 // The world
 
-/// A cell keeps two words, one per phase parity: the state it published at a phase goes in the
-/// word of that phase's parity, tagged with the phase. A neighbor at phase `p` reads the word of
-/// `p`'s parity, which the cell doesn't overwrite until it reaches `p + 2`, so a neighbor one phase
-/// ahead still serves it (the kept-back value), and no reader needs another word in step with it.
+/// A cell keeps four words: per phase parity, a state word and a velocity word. The state it
+/// published at a phase goes in that parity's state word, tagged with the phase, and its velocity in
+/// that parity's velocity word. A neighbor at phase `p` reads the words of `p`'s parity, which the
+/// cell doesn't overwrite until it reaches `p + 2`, so a neighbor one phase ahead still serves it
+/// (the kept-back value), and no reader needs another word in step with it.
 const STATE_BITS: u32 = 19;
 const STATE_MASK: u32 = (1 << STATE_BITS) - 1;
 /// The phase is stored in the top 13 bits and wraps; neighbors are never more than one apart.
 pub const PHASE_MASK: u32 = (1 << (32 - STATE_BITS)) - 1;
+/// Words per cell: state even, state odd, velocity even, velocity odd.
+pub const WORDS: usize = 4;
 
 fn word(state: State, phase: u32) -> u32 {
     state.encode() | (phase & PHASE_MASK) << STATE_BITS
 }
 
-/// The lattice: two `u32` words per cell (see `STATE_BITS`), cell by cell, row by row.
+/// The lattice: four `u32` words per cell (see `WORDS`), cell by cell, row by row, and the
+/// physics distribution's tunables.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct World {
     width: i32,
     height: i32,
     cells: Vec<u32>,
+    pub physics: Physics,
 }
 
 impl World {
     pub fn new(width: i32, height: i32) -> World {
         // Phase 0 in the even word; the odd word holds phase -1.
-        let pair = [word(State::AIR, 0), word(State::AIR, PHASE_MASK)];
-        World { width, height, cells: pair.repeat((width * height) as usize) }
+        let cell = [word(State::AIR, 0), word(State::AIR, PHASE_MASK), 0, 0];
+        World { width, height, cells: cell.repeat((width * height) as usize), physics: Physics::default() }
     }
 
     /// Rebuilds a world from raw cell words, e.g. a GPU readback.
     pub fn from_words(width: i32, height: i32, words: Vec<u32>) -> World {
-        assert_eq!(words.len(), 2 * (width * height) as usize, "{width}x{height} lattice, two words a cell");
-        World { width, height, cells: words }
+        assert_eq!(words.len(), WORDS * (width * height) as usize, "{width}x{height} lattice, {WORDS} words a cell");
+        World { width, height, cells: words, physics: Physics::default() }
     }
 
     pub fn width(&self) -> i32 {
@@ -157,7 +224,7 @@ impl World {
         self.height
     }
 
-    /// The raw cell words, two per cell, row by row, as the GPU stores them.
+    /// The raw cell words, `WORDS` per cell, row by row, as the GPU stores them.
     pub fn words(&self) -> &[u32] {
         &self.cells
     }
@@ -170,33 +237,43 @@ impl World {
         (y * self.width + x) as usize
     }
 
-    /// Which of the cell's two words is its current one.
+    /// The parity of the cell's current words.
     fn current(&self, i: usize) -> usize {
-        let (even, odd) = (self.cells[2 * i] >> STATE_BITS, self.cells[2 * i + 1] >> STATE_BITS);
-        if even.wrapping_sub(odd) & PHASE_MASK == 1 { 2 * i } else { 2 * i + 1 }
+        let (even, odd) = (self.cells[WORDS * i] >> STATE_BITS, self.cells[WORDS * i + 1] >> STATE_BITS);
+        if even.wrapping_sub(odd) & PHASE_MASK == 1 { 0 } else { 1 }
+    }
+
+    /// The cell's state as published at the phase of `parity`.
+    fn read(&self, i: usize, parity: usize) -> State {
+        State::decode(self.cells[WORDS * i + parity] & STATE_MASK, self.cells[WORDS * i + 2 + parity])
     }
 
     /// What the cell published at its current phase.
     pub fn cell(&self, x: i32, y: i32) -> State {
-        State::decode(self.cells[self.current(self.index(x, y))] & STATE_MASK)
+        let i = self.index(x, y);
+        self.read(i, self.current(i))
     }
 
     /// What the cell published the phase before: its kept-back value.
     pub fn kept(&self, x: i32, y: i32) -> State {
-        State::decode(self.cells[self.current(self.index(x, y)) ^ 1] & STATE_MASK)
+        let i = self.index(x, y);
+        self.read(i, self.current(i) ^ 1)
     }
 
+    /// What the cell shows: the material of the particle it holds.
     pub fn material(&self, x: i32, y: i32) -> Material {
         self.cell(x, y).material
     }
 
     pub fn phase(&self, x: i32, y: i32) -> u32 {
-        self.cells[self.current(self.index(x, y))] >> STATE_BITS
+        let i = self.index(x, y);
+        self.cells[WORDS * i + self.current(i)] >> STATE_BITS
     }
 
-    /// How many cells hold `material`.
+    /// A census of published state: how many particles of `material` there are, counting a
+    /// particle in transport once, at its origin (see `State::counts_as`).
     pub fn count(&self, material: Material) -> usize {
-        (0..self.height).map(|y| (0..self.width).filter(|&x| self.material(x, y) == material).count()).sum()
+        (0..self.height).map(|y| (0..self.width).filter(|&x| self.cell(x, y).counts_as() == material).count()).sum()
     }
 
     /// Whether every cell is at the same phase, as after a whole `step`.
@@ -205,23 +282,34 @@ impl World {
         (0..self.height).all(|y| (0..self.width).all(|x| self.phase(x, y) == p))
     }
 
+    /// Whether the cell is part of a live contract: it has an offer out, one awaiting its verdict,
+    /// or a particle in transport. The brush leaves such cells alone.
+    pub fn engaged(&self, x: i32, y: i32) -> bool {
+        let (now, kept) = (self.cell(x, y), self.kept(x, y));
+        now.offer.is_some() || now.accept.is_some() || kept.offer.is_some()
+    }
+
     /// The brush, the one source and sink of matter. Matter goes only into a cell holding air;
-    /// erasing (painting air) clears anything but bedrock. Call it between phases.
+    /// erasing (painting air) clears anything but bedrock. A painted particle is at rest. Cells
+    /// engaged in a contract are left alone. Call it between phases.
     pub fn paint(&mut self, x: i32, y: i32, material: Material) {
         let here = self.material(x, y);
         let allowed = match material {
             Material::Air => here != Material::Air && here != Material::Bedrock,
             _ => here == Material::Air,
         };
-        if allowed {
+        if allowed && !self.engaged(x, y) {
             self.set(x, y, State::holding(material));
         }
     }
 
-    /// Overwrites the cell's current word, keeping its phase.
+    /// Overwrites the cell's current words, keeping its phase.
     fn set(&mut self, x: i32, y: i32, s: State) {
-        let i = self.current(self.index(x, y));
-        self.cells[i] = word(s, self.cells[i] >> STATE_BITS);
+        let i = self.index(x, y);
+        let parity = self.current(i);
+        let slot = WORDS * i + parity;
+        self.cells[slot] = word(s, self.cells[slot] >> STATE_BITS);
+        self.cells[WORDS * i + 2 + parity] = s.velocity.encode();
     }
 
     /// One brush stamp: `paint` every cell whose centre lies within `radius` of `(cx, cy)`, in
@@ -238,7 +326,7 @@ impl World {
     }
 
     /// Evaluate one cell. It advances one phase unless a neighbor is still behind it, reading each
-    /// neighbor's word of its own phase's parity, and its own two words. Returns whether it advanced.
+    /// neighbor's words of its own phase's parity, and its own. Returns whether it advanced.
     pub fn update(&mut self, x: i32, y: i32) -> bool {
         let i = self.index(x, y);
         let phase = self.phase(x, y);
@@ -249,31 +337,38 @@ impl World {
             if !self.in_bounds(nx, ny) {
                 continue;
             }
-            let n = self.cells[2 * self.index(nx, ny) + parity];
-            if n >> STATE_BITS != phase {
+            let n = self.index(nx, ny);
+            if self.cells[WORDS * n + parity] >> STATE_BITS != phase {
                 return false; // behind
             }
-            seen[d as usize] = State::decode(n & STATE_MASK);
+            seen[d as usize] = self.read(n, parity);
         }
-        let me = State::decode(self.cells[2 * i + parity] & STATE_MASK);
-        // The kept-back word, which this update overwrites: no neighbor reads it any more.
-        let kept = State::decode(self.cells[2 * i + 1 - parity] & STATE_MASK);
+        let me = self.read(i, parity);
+        // The kept-back words, which this update overwrites: no neighbor reads them any more.
+        let kept = self.read(i, 1 - parity);
         let ahead = phase.wrapping_add(1) & PHASE_MASK;
-        self.cells[2 * i + 1 - parity] = word(next(me, kept, seen, x, y, phase), ahead);
+        let s = next(me, kept, seen, x, y, phase, &self.physics);
+        self.cells[WORDS * i + 1 - parity] = word(s, ahead);
+        self.cells[WORDS * i + 3 - parity] = s.velocity.encode();
         true
     }
 
     /// One phase for every cell, row by row. Any order gives the same result. Debug builds check
-    /// conservation after every step.
+    /// the census after every step.
     pub fn step(&mut self) {
         #[cfg(debug_assertions)]
-        let before = self.count(Material::Sand);
+        let before = (self.count(Material::Sand), self.count(Material::Air));
         for y in 0..self.height {
             for x in 0..self.width {
                 self.update(x, y);
             }
         }
         #[cfg(debug_assertions)]
-        assert_eq!(before, self.count(Material::Sand), "matter not conserved by a step at phase {}", self.phase(0, 0));
+        assert_eq!(
+            before,
+            (self.count(Material::Sand), self.count(Material::Air)),
+            "particles not conserved by a step at phase {}",
+            self.phase(0, 0)
+        );
     }
 }
