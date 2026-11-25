@@ -148,30 +148,30 @@ fn mass(m: u32) -> u32 {
 }
 
 // `Physics::compatible`.
-fn compatible(origin: u32, target: u32) -> bool {
+fn compatible(origin: u32, dest: u32) -> bool {
     if origin != SAND {
         return false;
     }
-    if target == AIR {
+    if dest == AIR {
         return params.sand_into_air != 0u;
     }
-    if target == SAND {
+    if dest == SAND {
         return params.into_sand > 0u;
     }
     return false;
 }
 
 // `Physics::overwrites`.
-fn overwrites(origin: u32, target: u32) -> bool {
-    return origin == SAND && target == AIR && params.sand_into_air != 0u;
+fn overwrites(origin: u32, dest: u32) -> bool {
+    return origin == SAND && dest == AIR && params.sand_into_air != 0u;
 }
 
 // `Physics::weight`.
-fn weight(v: vec2<i32>, d: u32, target: u32) -> u32 {
+fn weight(v: vec2<i32>, d: u32, dest: u32) -> u32 {
     var factor = 0u;
-    if target == AIR {
+    if dest == AIR {
         factor = params.into_air;
-    } else if target == SAND {
+    } else if dest == SAND {
         factor = params.into_sand;
     }
     factor = min(factor, FACTOR_CAP);
@@ -246,9 +246,9 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     if !committed {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
-            let target = (*seen)[d].material;
-            if compatible(live.material, target) {
-                weights[d] = weight(live.velocity, d, target);
+            let dest = (*seen)[d].material;
+            if compatible(live.material, dest) {
+                weights[d] = weight(live.velocity, d, dest);
             }
         }
         live.offer = select_from(&weights, hash(x, y, phase, SALT_PROPOSE));
