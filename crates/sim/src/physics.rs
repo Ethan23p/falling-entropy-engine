@@ -8,39 +8,51 @@
 //!   is basically a direction for now, at a steady scale (`Velocity::SCALE`).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
 //!   mass, turning the velocity toward down. New particles start out intending to move down.
-//! - **Vacuum** is empty capacity: air and sand may offer into it, and a particle that moves out
-//!   of a cell leaves vacuum behind. Evaluate favors heavier particles.
-//! - **Overwriting**: sand may offer into a cell holding air (a toggle); the air is overwritten,
-//!   and the origin is granted an air. Sand may also offer into sand, which evaluate rejects.
+//! - **Vacuum** is empty capacity, and most of a ball pit: a particle moves only into vacuum, and
+//!   leaves vacuum behind. Evaluate favors heavier particles. Nothing is overwritten, swapped or
+//!   displaced. A particle may still offer into a cell holding another (air, water or sand, each
+//!   weighted), which evaluate rejects.
+//! - **Slate** is static, like bedrock: nothing offers into it.
+//! - **Deflection**: the effect of a rejected offer on its origin. The particle's velocity turns a
+//!   little away from the cell that refused it, to the side its velocity already leans (or, dead on,
+//!   to a side the hash picks), by its material's deflection.
 
 use crate::{Dir, Material, Velocity};
 
 /// The tunables of the physics distribution. All integers, so the shaders match bit for bit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Physics {
-    /// Whether sand may overwrite air.
-    pub sand_into_air: bool,
     /// Gravity's impulse per unit of mass, in velocity units (`Velocity::SCALE` is one cell per move).
     pub gravity: u32,
-    /// Each material's mass: air, sand. Vacuum has none; bedrock is static and never moves.
+    /// Each material's mass: air, water, sand. Vacuum has none; slate and bedrock are static.
     pub mass_air: u32,
+    pub mass_water: u32,
     pub mass_sand: u32,
-    /// The weight multiplier for a neighbor holding air, sand or vacuum.
+    /// The weight multiplier for a neighbor holding air, water, sand or vacuum.
     pub into_air: u32,
+    pub into_water: u32,
     pub into_sand: u32,
     pub into_vacuum: u32,
+    /// Each material's deflection: how far a rejection turns its velocity, in velocity units.
+    pub deflect_air: u32,
+    pub deflect_water: u32,
+    pub deflect_sand: u32,
 }
 
 impl Default for Physics {
     fn default() -> Self {
         Physics {
-            sand_into_air: true,
             gravity: 64,
             mass_air: 1,
+            mass_water: 2,
             mass_sand: 4,
             into_air: 16,
+            into_water: 8,
             into_sand: 1,
             into_vacuum: 16,
+            deflect_air: 64,
+            deflect_water: 32,
+            deflect_sand: 2,
         }
     }
 }
@@ -50,49 +62,74 @@ const FACTOR_CAP: u32 = 255;
 const MASS_CAP: u32 = 16;
 /// The largest `along` counts for: a steady-scale velocity reaches at most 3 * `SCALE`.
 const ALONG_CAP: u32 = 1 << 10;
+const DEFLECT_CAP: u32 = 1 << 10;
 
 impl Physics {
     pub fn mass(&self, m: Material) -> u32 {
         match m {
             Material::Air => self.mass_air,
+            Material::Water => self.mass_water,
             Material::Sand => self.mass_sand,
-            Material::Bedrock | Material::Vacuum => 0,
+            Material::Bedrock | Material::Slate | Material::Vacuum => 0,
         }
     }
 
     /// Whether a particle of `origin` may offer into a cell holding `target` at all: the exclusion
-    /// step. Only air and sand move; nothing offers into bedrock.
+    /// step. Only air, water and sand move; they offer into vacuum, or into another such particle
+    /// whose weight multiplier isn't zero; nothing offers into slate or bedrock.
     pub fn compatible(&self, origin: Material, target: Material) -> bool {
-        match (origin, target) {
-            (Material::Air | Material::Sand, Material::Vacuum) => true,
-            (Material::Sand, Material::Air) => self.sand_into_air,
-            (Material::Sand, Material::Sand) => self.into_sand > 0,
-            _ => false,
-        }
+        origin.moves() && (target == Material::Vacuum || (target.moves() && self.factor(target) > 0))
     }
 
     /// Evaluate's conditions: whether a particle of `origin` may move into a cell holding `target`.
-    /// Anything moves into vacuum; sand overwrites air. Anything else is rejected.
+    /// Only into vacuum.
     pub fn accepts(&self, origin: Material, target: Material) -> bool {
-        match (origin, target) {
-            (Material::Air | Material::Sand, Material::Vacuum) => true,
-            (Material::Sand, Material::Air) => self.sand_into_air,
-            _ => false,
-        }
+        origin.moves() && target == Material::Vacuum
     }
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding
     /// `target`: zero away from the velocity, growing as the square of how far it points that way.
     pub fn weight(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> u32 {
-        let factor = match target {
-            Material::Air => self.into_air,
-            Material::Sand => self.into_sand,
-            Material::Vacuum => self.into_vacuum,
-            Material::Bedrock => 0,
-        }
-        .min(FACTOR_CAP);
+        let factor = self.factor(target);
         let along = (velocity.along(d).max(0) as u32).min(ALONG_CAP);
         factor * self.mass(m).min(MASS_CAP) * ((along * along) >> 8)
+    }
+
+    /// The weight multiplier for offering into a cell holding `target`.
+    pub fn factor(&self, target: Material) -> u32 {
+        match target {
+            Material::Air => self.into_air,
+            Material::Water => self.into_water,
+            Material::Sand => self.into_sand,
+            Material::Vacuum => self.into_vacuum,
+            Material::Bedrock | Material::Slate => 0,
+        }
+        .min(FACTOR_CAP)
+    }
+
+    pub fn deflection(&self, m: Material) -> u32 {
+        match m {
+            Material::Air => self.deflect_air,
+            Material::Water => self.deflect_water,
+            Material::Sand => self.deflect_sand,
+            _ => 0,
+        }
+        .min(DEFLECT_CAP)
+    }
+
+    /// The velocity of a particle of `m` whose offer toward `d` was rejected: turned away from `d`,
+    /// perpendicular to it, by `m`'s deflection, to the side the velocity already leans, or when it
+    /// points dead on, to the side `bits` picks; then back to the steady scale.
+    pub fn deflected(&self, m: Material, v: Velocity, d: Dir, bits: u32) -> Velocity {
+        let k = self.deflection(m) as i32;
+        if k == 0 {
+            return v;
+        }
+        let (sx, sy) = d.step();
+        // The perpendicular (-sy, sx), and how far the velocity already leans along it.
+        let lean = -(v.x as i32) * sy + v.y as i32 * sx;
+        let side = if lean > 0 || (lean == 0 && bits & 1 == 1) { 1 } else { -1 };
+        Velocity::steady(v.x as i32 - side * k * sy / 2, v.y as i32 + side * k * sx / 2)
     }
 
     /// The velocity of a particle of `m` that just moved: gravity's impulse added, then brought back

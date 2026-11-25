@@ -3,7 +3,7 @@
 //!
 //! A column-offset hexagonal lattice of cells, advanced by a synchronizer (a cell updates and
 //! advances a phase only once every neighbor has reached its phase). Each cell holds one particle
-//! (air, sand or bedrock, with a velocity) and its contracts, reads only its neighbors' published
+//! (air, water, sand, slate or bedrock with a velocity, or vacuum) and its contracts, reads only its neighbors' published
 //! state and writes only itself. The update's stages are in `update`; the physics distribution
 //! that biases selection is in `physics`.
 
@@ -92,12 +92,24 @@ pub enum Material {
     Bedrock = 2,
     /// Empty capacity: no particle, no mass.
     Vacuum = 3,
+    /// Static: it never moves, and nothing moves into it. Unlike bedrock, the brush can erase it.
+    Slate = 4,
+    /// A liquid: lighter than sand, heavier than air.
+    Water = 5,
 }
 
 impl Material {
-    /// Whether this is a particle that moves: air or sand.
+    /// Every material, in encoded order: the order of a census.
+    pub const ALL: [Material; 6] =
+        [Material::Air, Material::Sand, Material::Bedrock, Material::Vacuum, Material::Slate, Material::Water];
+
+    /// Whether this is a particle that moves: air, sand or water.
     pub fn moves(self) -> bool {
-        matches!(self, Material::Air | Material::Sand)
+        matches!(self, Material::Air | Material::Sand | Material::Water)
+    }
+
+    pub fn decode(bits: u32) -> Material {
+        Material::ALL.get(bits as usize).copied().unwrap_or(Material::Vacuum)
     }
 }
 
@@ -147,16 +159,13 @@ impl Velocity {
 ///   resolves it in the update after, reading the verdict. Meanwhile the particle is committed.
 /// - `accept`: the verdict on an offer from the neighbor toward that direction, accepted in this
 ///   cell's last update; every other offer that targeted this cell then was rejected. The particle
-///   held here is in transport until that neighbor resolves.
-/// - `grant`: with `accept`, the accepted particle overwrote an air, so its origin is granted an
-///   air when it resolves; without it, the particle filled vacuum, and its origin is left vacuum.
+///   held here is in transport until that neighbor resolves, which leaves it vacuum.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
     pub material: Material,
     pub velocity: Velocity,
     pub offer: Option<Dir>,
     pub accept: Option<Dir>,
-    pub grant: bool,
 }
 
 impl State {
@@ -167,48 +176,37 @@ impl State {
     /// A fresh cell with no contracts: a particle that moves intends to move down.
     pub const fn holding(material: Material) -> State {
         let velocity = match material {
-            Material::Air | Material::Sand => Velocity::DOWN,
+            Material::Air | Material::Sand | Material::Water => Velocity::DOWN,
             _ => Velocity::ZERO,
         };
-        State { material, velocity, offer: None, accept: None, grant: false }
+        State { material, velocity, offer: None, accept: None }
     }
 
-    /// Bits 0-1 the material, 2-4 the offer and 5-7 the acceptance (1 + a direction, or 0 for
-    /// none), bit 8 the grant. The velocity has a word of its own (`Velocity::encode`).
+    /// Bits 0-2 the material, 3-5 the offer and 6-8 the acceptance (1 + a direction, or 0 for
+    /// none). The velocity has a word of its own (`Velocity::encode`).
     pub fn encode(self) -> u32 {
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
-        self.material as u32 | dir(self.offer) << 2 | dir(self.accept) << 5 | (self.grant as u32) << 8
+        self.material as u32 | dir(self.offer) << 3 | dir(self.accept) << 6
     }
 
     pub fn decode(bits: u32, velocity: u32) -> State {
-        let material = match bits & 3 {
-            0 => Material::Air,
-            1 => Material::Sand,
-            2 => Material::Bedrock,
-            _ => Material::Vacuum,
-        };
         let dir = |b: u32| match b & 7 {
             0 | 7 => None,
             n => Some(Dir::ALL[n as usize - 1]),
         };
         State {
-            material,
+            material: Material::decode(bits & 7),
             velocity: Velocity::decode(velocity),
-            offer: dir(bits >> 2),
-            accept: dir(bits >> 5),
-            grant: bits >> 8 & 1 == 1,
+            offer: dir(bits >> 3),
+            accept: dir(bits >> 6),
         }
     }
 
     /// What the cell counts as holding in a census of published state: a particle accepted this
     /// phase is still in transport (its origin counts it until it resolves), so the cell counts
-    /// as what it held before: the air it overwrote, or vacuum.
+    /// as what it held before: vacuum.
     pub fn counts_as(self) -> Material {
-        match (self.accept, self.grant) {
-            (None, _) => self.material,
-            (Some(_), true) => Material::Air,
-            (Some(_), false) => Material::Vacuum,
-        }
+        if self.accept.is_some() { Material::Vacuum } else { self.material }
     }
 }
 
@@ -247,8 +245,9 @@ pub struct World {
 impl World {
     pub fn new(width: i32, height: i32) -> World {
         // Phase 0 in the even word; the odd word holds phase -1.
-        let v = State::AIR.velocity.encode();
-        let cell = [word(State::AIR, 0), word(State::AIR, PHASE_MASK), v, v];
+        // A fresh lattice is empty space: vacuum.
+        let v = State::VACUUM.velocity.encode();
+        let cell = [word(State::VACUUM, 0), word(State::VACUUM, PHASE_MASK), v, v];
         World { width, height, cells: cell.repeat((width * height) as usize), physics: Physics::default() }
     }
 
@@ -318,9 +317,9 @@ impl World {
         (0..self.height).map(|y| (0..self.width).filter(|&x| self.cell(x, y).counts_as() == material).count()).sum()
     }
 
-    /// The census of every material: air, sand, bedrock, vacuum.
-    pub fn census(&self) -> [usize; 4] {
-        [Material::Air, Material::Sand, Material::Bedrock, Material::Vacuum].map(|m| self.count(m))
+    /// The census of every material, in `Material::ALL` order.
+    pub fn census(&self) -> [usize; 6] {
+        Material::ALL.map(|m| self.count(m))
     }
 
     /// Whether every cell is at the same phase, as after a whole `step`.
@@ -336,18 +335,14 @@ impl World {
         now.offer.is_some() || now.accept.is_some() || kept.offer.is_some()
     }
 
-    /// The brush, the one source and sink of matter. Sand and bedrock go only into a cell holding
-    /// air or vacuum; erasing (painting air) and painting vacuum replace anything but bedrock. A
+    /// The brush, the one source and sink of matter. Matter (air, water, sand, slate, bedrock) goes
+    /// only into a cell holding vacuum; erasing (painting vacuum) empties anything but bedrock. A
     /// painted particle intends to move down (`State::holding`). Cells engaged in a contract are
     /// left alone. Call it between phases.
     pub fn paint(&mut self, x: i32, y: i32, material: Material) {
         let here = self.material(x, y);
-        let allowed = here != material
-            && here != Material::Bedrock
-            && match material {
-                Material::Air | Material::Vacuum => true,
-                _ => here == Material::Air || here == Material::Vacuum,
-            };
+        let allowed =
+            here != material && here != Material::Bedrock && (material == Material::Vacuum || here == Material::Vacuum);
         if allowed && !self.engaged(x, y) {
             self.set(x, y, State::holding(material));
         }

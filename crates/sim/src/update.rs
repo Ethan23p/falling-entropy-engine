@@ -12,11 +12,12 @@
 //! contracts it just proposed, so neighbors read them together at the next phase.
 
 use crate::physics::select;
-use crate::{Dir, Material, Physics, State, hash};
+use crate::{Dir, Physics, State, hash};
 
 /// Salts for the selections, so they draw independent random bits.
 pub const SALT_EVALUATE: u32 = 1;
 pub const SALT_PROPOSE: u32 = 2;
+pub const SALT_DEFLECT: u32 = 3;
 
 /// One cell's update: its next published state from its own state, the state it kept back from
 /// the phase before, and its neighbors' published state, all at the same phase (outside the
@@ -24,11 +25,11 @@ pub const SALT_PROPOSE: u32 = 2;
 #[allow(clippy::too_many_arguments)]
 pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32, physics: &Physics) -> State {
     // Read: `seen` is the neighbors' published state; the live state starts as my own.
-    let mut live = State { offer: None, accept: None, grant: false, ..me };
+    let mut live = State { offer: None, accept: None, ..me };
     // An offer I published this phase is evaluated this phase; its particle stays committed.
     let committed = me.offer.is_some();
 
-    resolve(&mut live, kept, &seen);
+    resolve(&mut live, kept, &seen, x, y, phase, physics);
     if !committed {
         evaluate(&mut live, &seen, x, y, phase, physics);
     }
@@ -40,21 +41,23 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     live
 }
 
-/// Resolve: the offer I published last phase has its verdict now, in the neighbor's acceptance.
-/// Accepted, the particle has moved: I am left vacuum, or granted an air if it overwrote one.
-/// Rejected, I keep my particle and its velocity.
-fn resolve(live: &mut State, kept: State, seen: &[State; 6]) {
+/// Resolve: the offer I published last phase has its verdict now, in the neighbor's acceptance,
+/// and I apply the contract's effect on me. Accepted, the particle has moved: I am left vacuum.
+/// Rejected, I keep my particle, and it is deflected (`Physics::deflected`).
+#[allow(clippy::too_many_arguments)]
+fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let Some(d) = kept.offer else { return };
     let verdict = seen[d as usize];
     if verdict.accept == Some(d.opposite()) {
-        *live = State::holding(if verdict.grant { Material::Air } else { Material::Vacuum });
+        *live = State::VACUUM;
+    } else {
+        live.velocity = physics.deflected(live.material, live.velocity, d, hash(x, y, phase, SALT_DEFLECT));
     }
 }
 
 /// Evaluate: every offer that targets me, selected one at a time biased by the physics
 /// distribution (heavier particles and better-aligned moves first). The first whose conditions
-/// hold is accepted: its particle moves in, with gravity's impulse, overwriting an air (granting
-/// one to its origin) or filling vacuum. My capacity is then filled, so the conditions of the rest
+/// hold is accepted: its particle moves in, with gravity's impulse, filling the vacuum. My capacity is then filled, so the conditions of the rest
 /// fail and they are rejected, by not being named.
 fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
@@ -66,13 +69,12 @@ fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phy
     }
     let Some(i) = select(&weights, hash(x, y, phase, SALT_EVALUATE)) else { return };
     let origin = seen[i];
-    live.grant = live.material == Material::Air;
     live.material = origin.material;
     live.velocity = physics.moved(origin.material, origin.velocity);
     live.accept = Some(Dir::ALL[i]);
 }
 
-/// Evolve: natural contracts, within the cell. v01.00 has none.
+/// Evolve: natural contracts, within the cell. None yet.
 fn evolve(_live: &mut State) {}
 
 /// Propose: the particle I host offers to move toward a neighbor. Start with all six, exclude those

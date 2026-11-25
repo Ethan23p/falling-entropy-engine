@@ -1,6 +1,6 @@
-//! Falling Entropy Engine, v01.01: air, sand, vacuum and bedrock on a synchronized hex lattice, moved by
-//! contracts biased by the physics distribution. The lattice lives on the GPU; the brush paints
-//! sand or vacuum and erases; the config panel tunes the physics, the rates, the cell size and the
+//! Falling Entropy Engine, v01.05: air, water, sand, slate and bedrock in vacuum on a synchronized hex
+//! lattice, moved by contracts biased by the physics distribution. The lattice lives on the GPU; the
+//! brush paints sand, water, air or slate and erases to vacuum; the config panel tunes the physics, the rates, the cell size and the
 //! brush, and picks a preset scene.
 //!
 //! Native: `cargo run -p sand [-- --scene NAME]`. Web: `trunk serve` from this folder, with
@@ -28,13 +28,17 @@ pub struct Config {
     pub scene: usize,
     pub brush_radius: f32,
     pub tool: usize,
-    pub sand_into_air: bool,
     pub gravity: i32,
     pub mass_air: i32,
+    pub mass_water: i32,
     pub mass_sand: i32,
     pub into_air: i32,
+    pub into_water: i32,
     pub into_sand: i32,
     pub into_vacuum: i32,
+    pub deflect_air: i32,
+    pub deflect_water: i32,
+    pub deflect_sand: i32,
 }
 
 impl Default for Config {
@@ -47,13 +51,17 @@ impl Default for Config {
             scene: 0,
             brush_radius: 3.0,
             tool: 0,
-            sand_into_air: p.sand_into_air,
             gravity: p.gravity as i32,
             mass_air: p.mass_air as i32,
+            mass_water: p.mass_water as i32,
             mass_sand: p.mass_sand as i32,
             into_air: p.into_air as i32,
+            into_water: p.into_water as i32,
             into_sand: p.into_sand as i32,
             into_vacuum: p.into_vacuum as i32,
+            deflect_air: p.deflect_air as i32,
+            deflect_water: p.deflect_water as i32,
+            deflect_sand: p.deflect_sand as i32,
         }
     }
 }
@@ -63,13 +71,17 @@ impl Config {
     pub fn physics(&self) -> sim::Physics {
         let u = |v: i32| v.max(0) as u32;
         sim::Physics {
-            sand_into_air: self.sand_into_air,
             gravity: u(self.gravity),
             mass_air: u(self.mass_air),
+            mass_water: u(self.mass_water),
             mass_sand: u(self.mass_sand),
             into_air: u(self.into_air),
+            into_water: u(self.into_water),
             into_sand: u(self.into_sand),
             into_vacuum: u(self.into_vacuum),
+            deflect_air: u(self.deflect_air),
+            deflect_water: u(self.deflect_water),
+            deflect_sand: u(self.deflect_sand),
         }
     }
 
@@ -83,13 +95,17 @@ impl Tunable for Config {
 
     fn schema(s: &mut Schema<Self>) {
         s.group("Physics")
-            .toggle("sand_into_air", "Sand offers into air", |c| &mut c.sand_into_air)
             .int("gravity", "Gravity: impulse per move, per mass", "", 0..=1024, |c| &mut c.gravity)
             .int("mass_sand", "Mass of sand", "", 0..=16, |c| &mut c.mass_sand)
+            .int("mass_water", "Mass of water", "", 0..=16, |c| &mut c.mass_water)
             .int("mass_air", "Mass of air", "", 0..=16, |c| &mut c.mass_air)
             .int("into_air", "Weight of moving into air", "", 0..=255, |c| &mut c.into_air)
+            .int("into_water", "Weight of moving into water", "", 0..=255, |c| &mut c.into_water)
             .int("into_sand", "Weight of moving into sand", "", 0..=255, |c| &mut c.into_sand)
-            .int("into_vacuum", "Weight of moving into vacuum", "", 0..=255, |c| &mut c.into_vacuum);
+            .int("into_vacuum", "Weight of moving into vacuum", "", 0..=255, |c| &mut c.into_vacuum)
+            .int("deflect_water", "Deflection of water on rejection", "", 0..=1024, |c| &mut c.deflect_water)
+            .int("deflect_sand", "Deflection of sand on rejection", "", 0..=1024, |c| &mut c.deflect_sand)
+            .int("deflect_air", "Deflection of air on rejection", "", 0..=1024, |c| &mut c.deflect_air);
         s.group("Rates").float("sim_rate", "Sim rate", "phases/s", 1.0..=960.0, 1.0, |c| &mut c.sim_rate).int(
             "max_phases",
             "Most phases per render frame",
@@ -100,7 +116,7 @@ impl Tunable for Config {
         s.group("Lattice")
             .float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size)
             .choice("scene", "Scene (rebuilds)", &SCENE_NAMES, |c| &mut c.scene);
-        s.group("Brush").choice("tool", "Tool", &["Sand", "Vacuum", "Erase"], |c| &mut c.tool).float(
+        s.group("Brush").choice("tool", "Tool", &["Sand", "Water", "Air", "Slate", "Erase"], |c| &mut c.tool).float(
             "brush_radius",
             "Radius",
             "cells",
@@ -172,7 +188,8 @@ impl Game {
 
     fn stamp(&mut self, at: Vec2) {
         let c = &self.tuner.current;
-        let material = [Material::Sand, Material::Vacuum, Material::Air][c.tool.min(2)];
+        let material =
+            [Material::Sand, Material::Water, Material::Air, Material::Slate, Material::Vacuum][c.tool.min(4)];
         self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, material });
     }
 

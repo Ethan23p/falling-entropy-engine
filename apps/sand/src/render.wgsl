@@ -31,6 +31,9 @@ const AIR: vec3<f32> = vec3(0.075, 0.082, 0.106);
 const SAND: vec3<f32> = vec3(0.871, 0.718, 0.431);
 // Vacuum: a deep violet, darker than air and distinct from bedrock.
 const VACUUM: vec3<f32> = vec3(0.098, 0.035, 0.157);
+// Slate: a cool blue-grey stone; water: a clear mid blue.
+const SLATE: vec3<f32> = vec3(0.322, 0.361, 0.420);
+const WATER: vec3<f32> = vec3(0.165, 0.412, 0.773);
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -47,7 +50,8 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     if p.x < 0.0 || x >= view.width || y < 0 || y >= view.height {
         return vec4(BEDROCK, 1.0);
     }
-    let material = cells[current(y * view.width + x)] & 3u;
-    var colors = array<vec3<f32>, 4>(AIR, SAND, BEDROCK, VACUUM);
+    // The material, bits 0-2; codes past water read as vacuum.
+    let material = min(cells[current(y * view.width + x)] & 7u, 6u);
+    var colors = array<vec3<f32>, 7>(AIR, SAND, BEDROCK, VACUUM, SLATE, WATER, VACUUM);
     return vec4(colors[material], 1.0);
 }

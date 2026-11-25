@@ -68,6 +68,60 @@ pub const ALL: &[Scene] = &[
         script: None,
     },
     Scene { name: "pour", about: "sand poured onto a floor", build: Build::Code(|_| {}), script: Some(pour) },
+    Scene {
+        name: "silo",
+        about: "a slate silo full of sand with a small leak in the bottom, open air outside",
+        build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::Air)),
+        script: None,
+    },
+    Scene {
+        name: "silo-wide",
+        about: "the silo with a large leak in the bottom",
+        build: Build::Code(|w| silo(w, Leak::BottomLarge, Outside::Air)),
+        script: None,
+    },
+    Scene {
+        name: "silo-side",
+        about: "the silo with a leak in its side",
+        build: Build::Code(|w| silo(w, Leak::Side, Outside::Air)),
+        script: None,
+    },
+    Scene {
+        name: "silo-vacuum",
+        about: "the silo with a small leak, vacuum outside",
+        build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::Vacuum)),
+        script: None,
+    },
+    Scene {
+        name: "silo-limited-air",
+        about: "the silo with a small leak, vacuum outside but for a layer of air on the floor",
+        build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::LimitedAir)),
+        script: None,
+    },
+    Scene {
+        name: "silo-water",
+        about: "the silo with a small leak, standing in water",
+        build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::Water)),
+        script: None,
+    },
+    Scene {
+        name: "water-drop",
+        about: "one water in the center of an all-vacuum lattice",
+        build: Build::Code(water_drop),
+        script: None,
+    },
+    Scene {
+        name: "packed-water",
+        about: "a lattice packed with water and many cells of vacuum",
+        build: Build::Code(packed_water),
+        script: None,
+    },
+    Scene {
+        name: "pour-water",
+        about: "water poured into an all-vacuum lattice",
+        build: Build::Code(fill_vacuum),
+        script: Some(pour_water),
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Scene> {
@@ -83,9 +137,8 @@ fn packed(world: &mut World) {
     let (w, h) = (world.width(), world.height());
     for y in 0..h {
         for x in 0..w {
-            if sim::hash(x, y, 0, 41) & 1 == 1 {
-                world.paint(x, y, Material::Sand);
-            }
+            let m = if sim::hash(x, y, 0, 41) & 1 == 1 { Material::Sand } else { Material::Air };
+            world.paint(x, y, m);
         }
     }
 }
@@ -95,6 +148,104 @@ fn packed_vacuum(world: &mut World) {
     packed(world);
     let (w, h) = (world.width(), world.height());
     world.paint(w / 2, h / 2, Material::Vacuum);
+}
+
+/// Where the silo leaks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leak {
+    BottomSmall,
+    BottomLarge,
+    Side,
+}
+
+/// What surrounds the silo.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Outside {
+    Air,
+    Vacuum,
+    /// Vacuum, but for a layer of air on the floor.
+    LimitedAir,
+    /// Air, with a pool of water on the floor.
+    Water,
+}
+
+/// The silo toy case: a slate silo filled with sand, held up in the upper middle of the lattice
+/// (slate is static), with a leak.
+fn silo(world: &mut World, leak: Leak, outside: Outside) {
+    let (w, h) = (world.width(), world.height());
+    let (left, right) = (w / 2 - w / 6, w / 2 + w / 6);
+    let (top, bottom) = (h / 10, h / 2);
+    for y in 0..h {
+        for x in 0..w {
+            let fill = match outside {
+                Outside::Air => Some(Material::Air),
+                Outside::Vacuum => None,
+                Outside::LimitedAir => (y >= h - h / 8).then_some(Material::Air),
+                Outside::Water => Some(if y >= h - h / 5 { Material::Water } else { Material::Air }),
+            };
+            if let Some(m) = fill {
+                world.paint(x, y, m);
+            }
+        }
+    }
+    for y in top..=bottom {
+        world.paint(left, y, Material::Vacuum);
+        world.paint(right, y, Material::Vacuum);
+        world.paint(left, y, Material::Slate);
+        world.paint(right, y, Material::Slate);
+    }
+    for x in left..=right {
+        world.paint(x, bottom, Material::Vacuum);
+        world.paint(x, bottom, Material::Slate);
+    }
+    for y in top..bottom {
+        for x in left + 1..right {
+            world.paint(x, y, Material::Vacuum);
+            world.paint(x, y, Material::Sand);
+        }
+    }
+    let mid = w / 2;
+    let holes: Vec<(i32, i32)> = match leak {
+        Leak::BottomSmall => vec![(mid, bottom)],
+        Leak::BottomLarge => (mid - 2..=mid + 2).map(|x| (x, bottom)).collect(),
+        Leak::Side => vec![(right, bottom - 2), (right, bottom - 1)],
+    };
+    for (x, y) in holes {
+        world.paint(x, y, Material::Vacuum);
+        world.paint(x, y, Material::Sand);
+    }
+}
+
+fn fill_vacuum(world: &mut World) {
+    for y in 0..world.height() {
+        for x in 0..world.width() {
+            world.paint(x, y, Material::Vacuum);
+        }
+    }
+}
+
+/// One water in the center of an all-vacuum lattice.
+fn water_drop(world: &mut World) {
+    fill_vacuum(world);
+    let (w, h) = (world.width(), world.height());
+    world.paint(w / 2, h / 2, Material::Water);
+}
+
+/// Water everywhere, with one cell in eight vacuum, hashed.
+fn packed_water(world: &mut World) {
+    for y in 0..world.height() {
+        for x in 0..world.width() {
+            let m = if sim::hash(x, y, 0, 43).is_multiple_of(8) { Material::Vacuum } else { Material::Water };
+            world.paint(x, y, m);
+        }
+    }
+}
+
+/// The sand pour's trickle, in water.
+fn pour_water(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
+    if phase < 20 * RATE && phase.is_multiple_of(RATE / 20) {
+        out.push(Stamp { x: w as f32 / 2.0, y: 1.0, radius: 0.8, material: Material::Water });
+    }
 }
 
 /// A trickle of sand onto the middle of the floor, 20 grains a second for 20 s.
@@ -115,7 +266,7 @@ fn pour(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
 /// ```
 ///
 /// After the header, one line per row, top first: runs of a count (omitted when 1) and a glyph
-/// from `sim::debug::glyph`. Trailing air and missing rows are air.
+/// from `sim::debug::glyph`. Trailing vacuum and missing rows are vacuum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Painting {
     pub width: i32,
@@ -125,7 +276,7 @@ pub struct Painting {
 }
 
 const HEADER: &str = "fse-scene 1";
-const MATERIALS: [Material; 4] = [Material::Air, Material::Sand, Material::Bedrock, Material::Vacuum];
+const MATERIALS: [Material; 6] = Material::ALL;
 
 impl Painting {
     pub fn of(world: &World, about: &str) -> Painting {
@@ -146,7 +297,7 @@ impl Painting {
         }
         for y in 0..self.height {
             let row: Vec<Material> = (0..self.width).map(|x| self.material(x, y)).collect();
-            let end = row.iter().rposition(|&m| m != Material::Air).map_or(0, |i| i + 1);
+            let end = row.iter().rposition(|&m| m != Material::Vacuum).map_or(0, |i| i + 1);
             let mut x = 0;
             while x < end {
                 let run = row[x..end].iter().take_while(|&&m| m == row[x]).count();
@@ -175,7 +326,7 @@ impl Painting {
             return Err(format!("bad size `{size}`"));
         }
         let mut about = String::new();
-        let mut cells = vec![Material::Air; (width * height) as usize];
+        let mut cells = vec![Material::Vacuum; (width * height) as usize];
         let mut y = 0;
         for line in lines {
             if let Some(a) = line.strip_prefix("about") {
@@ -213,7 +364,7 @@ impl Painting {
         for y in 0..h {
             for x in 0..w {
                 let m = self.material(x * self.width / w, y * self.height / h);
-                if m != Material::Air {
+                if m != Material::Vacuum {
                     world.paint(x, y, m);
                 }
             }
@@ -251,9 +402,9 @@ mod tests {
         for scene in ALL {
             let mut run = run::Run::new(scene, 48, 36);
             for _ in 0..400 {
-                let before = run.world.count(Material::Sand);
+                let before = run.world.census();
                 let painted = run.step();
-                assert!(painted || run.world.count(Material::Sand) == before, "{}", scene.name);
+                assert!(painted || run.world.census() == before, "{}", scene.name);
             }
         }
     }
@@ -262,7 +413,7 @@ mod tests {
     fn painting_round_trips_through_text() {
         let mut world = World::new(30, 20);
         find("packed").unwrap().build(&mut world);
-        world.paint(0, 19, Material::Air);
+        world.paint(0, 19, Material::Vacuum);
         world.paint(0, 19, Material::Bedrock);
         let painting = Painting::of(&world, "  the packed lattice ");
         let text = painting.to_text();
@@ -287,7 +438,7 @@ mod tests {
         assert_eq!(world.material(0, 0), Material::Sand);
         assert_eq!(world.material(3, 1), Material::Air);
         assert_eq!(world.material(1, 3), Material::Bedrock);
-        assert_eq!(world.material(3, 3), Material::Air);
+        assert_eq!(world.material(3, 3), Material::Vacuum, "missing cells are vacuum");
     }
 
     #[test]
