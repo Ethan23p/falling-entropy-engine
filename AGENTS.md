@@ -37,7 +37,7 @@ Adversarial review comes in batches, not every version: a subagent tries to brea
 Keep it low-key:
 - Tests must stay fast. Compile times must stay low: few dependencies, and the sim crate has none.
 - The foundations (synchrony, contracts, rendering) get the most care; everything builds on them.
-- Context is a budget. Read only what the step needs; don't re-read the whole design doc each session. Start each version in a fresh session, and send wide reading, searching and surveys to subagents, which return only their conclusions.
+- Context is a budget. Read only what the step needs; re-read only the parts of the design doc that changed. Send wide reading, searching and surveys to subagents, which return only their conclusions.
 - Write code with the file-editing tools, not shell heredocs: the Bash tool's heredocs break on apostrophes.
 - Keep this file accurate when a rule or a command changes. Never put status here.
 
