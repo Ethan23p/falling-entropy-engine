@@ -1,6 +1,7 @@
-//! Falling Sand Engine, v01.00 scaffolding: air, sand and bedrock on a synchronized hex lattice, no
-//! rules yet. The lattice lives on the GPU; the brush paints sand into air and erases; the config
-//! panel tunes the rates, the cell size and the brush, and picks a preset scene.
+//! Falling Entropy Engine, v01.00: air, sand and bedrock on a synchronized hex lattice, moved by
+//! contracts biased by the physics distribution. The lattice lives on the GPU; the brush paints
+//! sand into air and erases; the config panel tunes the physics, the rates, the cell size and the
+//! brush, and picks a preset scene.
 //!
 //! Native: `cargo run -p sand [-- --scene NAME]`. Web: `trunk serve` from this folder, with
 //! `?scene=NAME` to start in a scene. The harness: `cargo run -p sand -- strip|bench ...`.
@@ -27,15 +28,54 @@ pub struct Config {
     pub scene: usize,
     pub brush_radius: f32,
     pub tool: usize,
+    pub sand_into_air: bool,
+    pub gravity: i32,
+    pub mass_air: i32,
+    pub mass_sand: i32,
+    pub restless: i32,
+    pub align: i32,
+    pub into_air: i32,
+    pub into_sand: i32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { sim_rate: 240.0, max_phases: 16, cell_size: 4.0, scene: 0, brush_radius: 3.0, tool: 0 }
+        let p = sim::Physics::default();
+        Self {
+            sim_rate: 240.0,
+            max_phases: 16,
+            cell_size: 4.0,
+            scene: 0,
+            brush_radius: 3.0,
+            tool: 0,
+            sand_into_air: p.sand_into_air,
+            gravity: p.gravity as i32,
+            mass_air: p.mass_air as i32,
+            mass_sand: p.mass_sand as i32,
+            restless: p.restless as i32,
+            align: p.align as i32,
+            into_air: p.into_air as i32,
+            into_sand: p.into_sand as i32,
+        }
     }
 }
 
 impl Config {
+    /// The physics distribution's tunables, as the sim takes them.
+    pub fn physics(&self) -> sim::Physics {
+        let u = |v: i32| v.max(0) as u32;
+        sim::Physics {
+            sand_into_air: self.sand_into_air,
+            gravity: u(self.gravity),
+            mass_air: u(self.mass_air),
+            mass_sand: u(self.mass_sand),
+            restless: u(self.restless),
+            align: u(self.align),
+            into_air: u(self.into_air),
+            into_sand: u(self.into_sand),
+        }
+    }
+
     pub fn scene(&self) -> &'static Scene {
         &scenes::ALL[self.scene.min(scenes::ALL.len() - 1)]
     }
@@ -45,6 +85,15 @@ impl Tunable for Config {
     const KEY: &'static str = "sand";
 
     fn schema(s: &mut Schema<Self>) {
+        s.group("Physics")
+            .toggle("sand_into_air", "Sand offers into air", |c| &mut c.sand_into_air)
+            .int("gravity", "Gravity: impulse per move, per mass", "", 0..=1024, |c| &mut c.gravity)
+            .int("mass_sand", "Mass of sand", "", 0..=16, |c| &mut c.mass_sand)
+            .int("mass_air", "Mass of air", "", 0..=16, |c| &mut c.mass_air)
+            .int("restless", "Restless: weight of any compatible move", "", 0..=255, |c| &mut c.restless)
+            .int("align", "Velocity's pull on direction", "", 0..=255, |c| &mut c.align)
+            .int("into_air", "Weight of moving into air", "", 0..=255, |c| &mut c.into_air)
+            .int("into_sand", "Weight of moving into sand", "", 0..=255, |c| &mut c.into_sand);
         s.group("Rates").float("sim_rate", "Sim rate", "phases/s", 1.0..=960.0, 1.0, |c| &mut c.sim_rate).int(
             "max_phases",
             "Most phases per render frame",
@@ -230,7 +279,8 @@ impl App for Game {
             radius: s.radius,
             material: s.material,
         }));
-        lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, phases);
+        let physics = self.tuner.current.physics();
+        lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, &physics, phases);
         self.stamps.clear();
         lattice.render(gpu.queue, pipelines, encoder, target, self.origin.into(), self.cell.into());
         self.read_scene(gpu, encoder);
