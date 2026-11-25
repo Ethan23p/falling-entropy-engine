@@ -2,6 +2,8 @@
 
 Falling Entropy Engine: Ethan's falling-sand game, v2, in Rust + WebGPU. It grows one mechanic at a time on cellular-automaton primitives. v1 is [Phosphor-Sand](https://github.com/Ethan23p/Phosphor-Sand); borrow its dynamics freely. This file holds standing rules only, no status.
 
+Treat this engine moreso as a tiny universe with real physics than a toy. Every behavior has to emerge from strict locality, self-writing cells, order-independent updates, and conserved quantities. If a given solution seems good but violates any of those, find a physically honest one, even if it's more difficult.
+
 ## Sources of truth
 
 - **The design doc is the authority:** Ethan's Logseq page [[Falling Entropy Engine]] (graph Logseq-DB-Aurelius), read on his PC (`C:\Caesar-General`) with the logseq-interface skill at `--level 50`. Use its vocabulary in code and tests. If the code disagrees, the doc wins; if the doc is silent, ask Ethan.
