@@ -11,7 +11,7 @@ publish = false
 sim = { path = "crates/sim" }
 scenes = { path = "crates/scenes" }
 # The shared platform layer, pinned. For local co-development, see AGENTS.md.
-engine = { git = "https://github.com/Ethan23p/contra-ethos-games", rev = "48210d5ebfbec0c580bc53f90055a10c5f850188" }
+engine = { git = "https://github.com/Ethan23p/contra-ethos-games", rev = "253a204425ab71da599e41a928c0494494897807" }
 pollster = "1"
 
 [profile.release]

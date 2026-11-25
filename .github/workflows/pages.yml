@@ -1,0 +1,63 @@
+# Builds the game for the web and deploys it to GitHub Pages (sand.contra-ethos.com).
+# Phosphor Sand (v1, plain ES modules) is copied in beside it at /phosphor/.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Ethan23p/Phosphor-Sand
+          path: phosphor-src
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Build the game
+        working-directory: apps/sand
+        run: trunk build --release --public-url ./
+
+      - name: Add Phosphor Sand
+        run: |
+          mkdir -p apps/sand/dist/phosphor
+          cp -r phosphor-src/index.html phosphor-src/style.css phosphor-src/src apps/sand/dist/phosphor/
+          ls -la apps/sand/dist apps/sand/dist/phosphor
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/sand/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
