@@ -72,7 +72,7 @@ fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phy
     live.accept = Some(Dir::ALL[i]);
 }
 
-/// Evolve: natural contracts, within the cell. v01.00 has none.
+/// Evolve: natural contracts, within the cell. None yet.
 fn evolve(_live: &mut State) {}
 
 /// Propose: the particle I host offers to move toward a neighbor. Start with all six, exclude those

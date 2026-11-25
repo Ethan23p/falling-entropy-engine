@@ -167,7 +167,10 @@ fn conservation_the_census_never_changes() {
     let mut w = scattered(20, 16);
     for i in 0..12 {
         w.paint(3 + i, 12, Material::Vacuum);
+        w.paint(3 + i, 10, Material::Water);
+        w.paint(3 + i, 14, Material::Water);
     }
+    w.paint(10, 13, Material::Slate);
     let census = w.census();
     for _ in 0..300 {
         w.step();
@@ -195,6 +198,17 @@ fn brush_paints_only_into_air() {
     w.paint(2, 2, Material::Bedrock);
     w.paint(2, 2, Material::Sand);
     assert_eq!(w.material(2, 2), Material::Bedrock, "sand does not replace bedrock");
+}
+
+#[test]
+fn brush_paints_slate_and_erases_it() {
+    let mut w = World::new(4, 4);
+    w.paint(1, 1, Material::Slate);
+    w.paint(1, 1, Material::Sand);
+    w.paint(1, 1, Material::Water);
+    assert_eq!(w.material(1, 1), Material::Slate, "neither sand nor water replaces slate");
+    w.paint(1, 1, Material::Air);
+    assert_eq!(w.material(1, 1), Material::Air, "unlike bedrock, slate erases");
 }
 
 #[test]
@@ -246,7 +260,7 @@ fn brush_keeps_the_cells_phase() {
 #[test]
 fn encoding_state_round_trips() {
     let velocities = [Velocity::ZERO, Velocity { x: -300, y: 32767 }, Velocity { x: i16::MIN, y: -1 }];
-    for material in [Material::Air, Material::Sand, Material::Bedrock, Material::Vacuum] {
+    for material in Material::ALL {
         for velocity in velocities {
             for offer in [None, Some(Dir::Up), Some(Dir::UpLeft)] {
                 for accept in [None, Some(Dir::Down), Some(Dir::UpRight)] {
@@ -612,4 +626,93 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
     // A heap, not a layer: the middle column stands well above the edges.
     let top = |x: i32| (0..20).find(|&y| w.material(x, y) == Material::Sand).unwrap_or(20);
     assert!(top(20) + 5 < top(5), "{}", w.ascii());
+}
+
+// Slate
+
+#[test]
+fn propose_nothing_offers_into_slate() {
+    let slate = State::holding(Material::Slate);
+    // Air only straight up, where velocity never reaches.
+    let seen = [State::AIR, slate, slate, slate, slate, slate];
+    let p = Physics::default();
+    for m in [Material::Sand, Material::Water] {
+        let n = proposals(State::holding(m), seen, &p);
+        assert_eq!(n[6], 4000, "{m:?} proposes nothing: {n:?}");
+    }
+}
+
+#[test]
+fn movement_slate_holds_sand_up() {
+    // A slate shelf across the middle: sand poured above it stays above it.
+    let mut w = World::new(20, 20);
+    for x in 0..20 {
+        w.paint(x, 10, Material::Slate);
+    }
+    w.stamp(10.0, 4.0, 2.5, Material::Sand);
+    let grains = w.count(Material::Sand);
+    for _ in 0..800 {
+        w.step();
+    }
+    let below =
+        (11..20).flat_map(|y| (0..20).map(move |x| (x, y))).filter(|&(x, y)| w.material(x, y) == Material::Sand);
+    assert_eq!(below.count(), 0, "{}", w.ascii());
+    assert_eq!((w.count(Material::Sand), w.count(Material::Slate)), (grains, 20));
+}
+
+// Water
+
+fn water(velocity: Velocity) -> State {
+    State { velocity, ..State::holding(Material::Water) }
+}
+
+#[test]
+fn propose_water_still_prefers_down() {
+    let n = proposals(water(DOWN), [State::VACUUM; 6], &Physics::default());
+    assert!(
+        n[Dir::Down as usize] > n[Dir::DownLeft as usize] && n[Dir::DownLeft as usize] > n[Dir::UpLeft as usize] * 4,
+        "{n:?}"
+    );
+}
+
+#[test]
+fn evaluate_water_rejects_sand_nothing_is_swapped_or_displaced() {
+    // Sand may offer into water, but water is matter, not air: evaluate rejects it.
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(water(DOWN), State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Water, None));
+    assert!(Physics::default().compatible(Material::Sand, Material::Water));
+}
+
+#[test]
+fn evaluate_water_overwrites_air_but_not_sand() {
+    let water_offering = State { offer: Some(Dir::Down), ..water(DOWN) };
+    let seen = around(&[(Dir::Up, water_offering)]);
+    let p = Physics::default();
+    let s = next(State::AIR, State::AIR, seen, 2, 2, 0, &p);
+    assert_eq!((s.material, s.grant), (Material::Water, true));
+    let s = next(sand(DOWN), State::AIR, seen, 2, 2, 0, &p);
+    assert_eq!((s.material, s.accept), (Material::Sand, None));
+    let off = Physics { water_into_air: false, ..p };
+    assert_eq!(next(State::AIR, State::AIR, seen, 2, 2, 0, &off), State::AIR);
+}
+
+#[test]
+fn movement_sand_rests_on_water_and_water_never_climbs() {
+    // A pool of water under a layer of sand, with air above: the sand can't swap with or displace
+    // the water, so the water stays where it is.
+    let mut w = World::new(16, 16);
+    for x in 0..16 {
+        for y in 6..10 {
+            w.paint(x, y, Material::Sand);
+        }
+        for y in 10..16 {
+            w.paint(x, y, Material::Water);
+        }
+    }
+    let water_top = |w: &World| (0..16).find(|&y| (0..16).any(|x| w.material(x, y) == Material::Water)).unwrap();
+    for _ in 0..600 {
+        w.step();
+        assert_eq!(water_top(&w), 10, "{}", w.ascii());
+    }
 }

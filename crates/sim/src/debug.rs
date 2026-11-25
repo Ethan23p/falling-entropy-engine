@@ -25,6 +25,8 @@ pub fn glyph(material: Material) -> char {
         Material::Sand => ':',
         Material::Bedrock => '@',
         Material::Vacuum => 'o',
+        Material::Slate => '#',
+        Material::Water => '~',
     }
 }
 

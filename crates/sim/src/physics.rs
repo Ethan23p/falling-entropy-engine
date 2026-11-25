@@ -8,25 +8,31 @@
 //!   is basically a direction for now, at a steady scale (`Velocity::SCALE`).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
 //!   mass, turning the velocity toward down. New particles start out intending to move down.
-//! - **Vacuum** is empty capacity: air and sand may offer into it, and a particle that moves out
-//!   of a cell leaves vacuum behind. Evaluate favors heavier particles.
-//! - **Overwriting**: sand may offer into a cell holding air (a toggle); the air is overwritten,
-//!   and the origin is granted an air. Sand may also offer into sand, which evaluate rejects.
+//! - **Vacuum** is empty capacity: every particle that moves may offer into it, and a particle that
+//!   moves out of a cell leaves vacuum behind. Evaluate favors heavier particles.
+//! - **Overwriting air**: sand and water may offer into a cell holding air, each a toggle; the air
+//!   is overwritten, and the origin is granted an air. Air is the only particle that is overwritten:
+//!   matter is never swapped or displaced. Sand may also offer into sand or water, which evaluate
+//!   rejects; it moves only into vacuum or air, like a ball into empty space.
+//! - **Slate** is static, like bedrock: nothing offers into it.
 
 use crate::{Dir, Material, Velocity};
 
 /// The tunables of the physics distribution. All integers, so the shaders match bit for bit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Physics {
-    /// Whether sand may overwrite air.
+    /// Whether sand may overwrite air, and water may overwrite air.
     pub sand_into_air: bool,
+    pub water_into_air: bool,
     /// Gravity's impulse per unit of mass, in velocity units (`Velocity::SCALE` is one cell per move).
     pub gravity: u32,
-    /// Each material's mass: air, sand. Vacuum has none; bedrock is static and never moves.
+    /// Each material's mass: air, water, sand. Vacuum has none; slate and bedrock are static.
     pub mass_air: u32,
+    pub mass_water: u32,
     pub mass_sand: u32,
-    /// The weight multiplier for a neighbor holding air, sand or vacuum.
+    /// The weight multiplier for a neighbor holding air, water, sand or vacuum.
     pub into_air: u32,
+    pub into_water: u32,
     pub into_sand: u32,
     pub into_vacuum: u32,
 }
@@ -35,10 +41,13 @@ impl Default for Physics {
     fn default() -> Self {
         Physics {
             sand_into_air: true,
+            water_into_air: true,
             gravity: 64,
             mass_air: 1,
+            mass_water: 2,
             mass_sand: 4,
             into_air: 16,
+            into_water: 8,
             into_sand: 1,
             into_vacuum: 16,
         }
@@ -55,28 +64,30 @@ impl Physics {
     pub fn mass(&self, m: Material) -> u32 {
         match m {
             Material::Air => self.mass_air,
+            Material::Water => self.mass_water,
             Material::Sand => self.mass_sand,
-            Material::Bedrock | Material::Vacuum => 0,
+            Material::Bedrock | Material::Slate | Material::Vacuum => 0,
         }
     }
 
     /// Whether a particle of `origin` may offer into a cell holding `target` at all: the exclusion
-    /// step. Only air and sand move; nothing offers into bedrock.
+    /// step. Only air, water and sand move; nothing offers into slate or bedrock.
     pub fn compatible(&self, origin: Material, target: Material) -> bool {
         match (origin, target) {
-            (Material::Air | Material::Sand, Material::Vacuum) => true,
-            (Material::Sand, Material::Air) => self.sand_into_air,
             (Material::Sand, Material::Sand) => self.into_sand > 0,
-            _ => false,
+            (Material::Sand, Material::Water) => self.into_water > 0,
+            _ => self.accepts(origin, target),
         }
     }
 
     /// Evaluate's conditions: whether a particle of `origin` may move into a cell holding `target`.
-    /// Anything moves into vacuum; sand overwrites air. Anything else is rejected.
+    /// Anything that moves moves into vacuum; sand and water overwrite air where toggled on.
+    /// Anything else is rejected.
     pub fn accepts(&self, origin: Material, target: Material) -> bool {
         match (origin, target) {
-            (Material::Air | Material::Sand, Material::Vacuum) => true,
+            (o, Material::Vacuum) => o.moves(),
             (Material::Sand, Material::Air) => self.sand_into_air,
+            (Material::Water, Material::Air) => self.water_into_air,
             _ => false,
         }
     }
@@ -86,9 +97,10 @@ impl Physics {
     pub fn weight(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> u32 {
         let factor = match target {
             Material::Air => self.into_air,
+            Material::Water => self.into_water,
             Material::Sand => self.into_sand,
             Material::Vacuum => self.into_vacuum,
-            Material::Bedrock => 0,
+            Material::Bedrock | Material::Slate => 0,
         }
         .min(FACTOR_CAP);
         let along = (velocity.along(d).max(0) as u32).min(ALONG_CAP);

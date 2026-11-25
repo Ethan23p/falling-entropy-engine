@@ -111,7 +111,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 48);
+        let params = uniform("params", 64);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -158,12 +158,16 @@ impl Lattice {
             self.height as u32,
             stamps.len() as u32,
             p.sand_into_air as u32,
+            p.water_into_air as u32,
             p.gravity,
             p.mass_air,
+            p.mass_water,
             p.mass_sand,
             p.into_air,
+            p.into_water,
             p.into_sand,
             p.into_vacuum,
+            0,
             0,
             0,
         ];
@@ -331,6 +335,9 @@ mod tests {
                 if sim::hash(x, y, 0, 78).is_multiple_of(9) {
                     world.paint(x, y, Material::Vacuum);
                 }
+                if sim::hash(x, y, 0, 79).is_multiple_of(5) {
+                    world.paint(x, y, Material::Water);
+                }
             }
         }
         let lattice = Lattice::new(&device, &pipelines, &world);
@@ -377,6 +384,8 @@ mod tests {
             Stamp { x: 10.0, y: 10.0, radius: 3.5, material: Material::Air },
             Stamp { x: 40.0, y: 30.0, radius: 4.5, material: Material::Vacuum },
             Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Sand },
+            Stamp { x: 12.0, y: 30.0, radius: 3.5, material: Material::Water },
+            Stamp { x: 45.0, y: 40.0, radius: 2.5, material: Material::Slate },
         ];
         for s in &stamps {
             world.stamp(s.x, s.y, s.radius, s.material);
