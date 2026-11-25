@@ -8,12 +8,10 @@
 //!   is basically a direction for now, at a steady scale (`Velocity::SCALE`).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
 //!   mass, turning the velocity toward down. New particles start out intending to move down.
-//! - **Vacuum** is empty capacity: every particle that moves may offer into it, and a particle that
-//!   moves out of a cell leaves vacuum behind. Evaluate favors heavier particles.
-//! - **Overwriting air**: sand and water may offer into a cell holding air, each a toggle; the air
-//!   is overwritten, and the origin is granted an air. Air is the only particle that is overwritten:
-//!   matter is never swapped or displaced. Sand may also offer into sand or water, which evaluate
-//!   rejects; it moves only into vacuum or air, like a ball into empty space.
+//! - **Vacuum** is empty capacity, and most of a ball pit: a particle moves only into vacuum, and
+//!   leaves vacuum behind. Evaluate favors heavier particles. Nothing is overwritten, swapped or
+//!   displaced. A particle may still offer into a cell holding another (air, water or sand, each
+//!   weighted), which evaluate rejects.
 //! - **Slate** is static, like bedrock: nothing offers into it.
 
 use crate::{Dir, Material, Velocity};
@@ -21,9 +19,6 @@ use crate::{Dir, Material, Velocity};
 /// The tunables of the physics distribution. All integers, so the shaders match bit for bit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Physics {
-    /// Whether sand may overwrite air, and water may overwrite air.
-    pub sand_into_air: bool,
-    pub water_into_air: bool,
     /// Gravity's impulse per unit of mass, in velocity units (`Velocity::SCALE` is one cell per move).
     pub gravity: u32,
     /// Each material's mass: air, water, sand. Vacuum has none; slate and bedrock are static.
@@ -40,8 +35,6 @@ pub struct Physics {
 impl Default for Physics {
     fn default() -> Self {
         Physics {
-            sand_into_air: true,
-            water_into_air: true,
             gravity: 64,
             mass_air: 1,
             mass_water: 2,
@@ -71,40 +64,36 @@ impl Physics {
     }
 
     /// Whether a particle of `origin` may offer into a cell holding `target` at all: the exclusion
-    /// step. Only air, water and sand move; nothing offers into slate or bedrock.
+    /// step. Only air, water and sand move; they offer into vacuum, or into another such particle
+    /// whose weight multiplier isn't zero; nothing offers into slate or bedrock.
     pub fn compatible(&self, origin: Material, target: Material) -> bool {
-        match (origin, target) {
-            (Material::Sand, Material::Sand) => self.into_sand > 0,
-            (Material::Sand, Material::Water) => self.into_water > 0,
-            _ => self.accepts(origin, target),
-        }
+        origin.moves() && (target == Material::Vacuum || (target.moves() && self.factor(target) > 0))
     }
 
     /// Evaluate's conditions: whether a particle of `origin` may move into a cell holding `target`.
-    /// Anything that moves moves into vacuum; sand and water overwrite air where toggled on.
-    /// Anything else is rejected.
+    /// Only into vacuum.
     pub fn accepts(&self, origin: Material, target: Material) -> bool {
-        match (origin, target) {
-            (o, Material::Vacuum) => o.moves(),
-            (Material::Sand, Material::Air) => self.sand_into_air,
-            (Material::Water, Material::Air) => self.water_into_air,
-            _ => false,
-        }
+        origin.moves() && target == Material::Vacuum
     }
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding
     /// `target`: zero away from the velocity, growing as the square of how far it points that way.
     pub fn weight(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> u32 {
-        let factor = match target {
+        let factor = self.factor(target);
+        let along = (velocity.along(d).max(0) as u32).min(ALONG_CAP);
+        factor * self.mass(m).min(MASS_CAP) * ((along * along) >> 8)
+    }
+
+    /// The weight multiplier for offering into a cell holding `target`.
+    pub fn factor(&self, target: Material) -> u32 {
+        match target {
             Material::Air => self.into_air,
             Material::Water => self.into_water,
             Material::Sand => self.into_sand,
             Material::Vacuum => self.into_vacuum,
             Material::Bedrock | Material::Slate => 0,
         }
-        .min(FACTOR_CAP);
-        let along = (velocity.along(d).max(0) as u32).min(ALONG_CAP);
-        factor * self.mass(m).min(MASS_CAP) * ((along * along) >> 8)
+        .min(FACTOR_CAP)
     }
 
     /// The velocity of a particle of `m` that just moved: gravity's impulse added, then brought back

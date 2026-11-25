@@ -106,7 +106,7 @@ mod tests {
         w.paint(0, 0, Material::Sand);
         w.paint(1, 0, Material::Sand);
         w.paint(2, 1, Material::Bedrock);
-        let want = "     012\n   0 : .\n     ::.\n   1 .:@\n     ..@\n      .\n";
+        let want = "     012\n   0 : o\n     ::o\n   1 o:@\n     oo@\n      o\n";
         assert_eq!(w.ascii(), want);
     }
 

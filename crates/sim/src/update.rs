@@ -12,7 +12,7 @@
 //! contracts it just proposed, so neighbors read them together at the next phase.
 
 use crate::physics::select;
-use crate::{Dir, Material, Physics, State, hash};
+use crate::{Dir, Physics, State, hash};
 
 /// Salts for the selections, so they draw independent random bits.
 pub const SALT_EVALUATE: u32 = 1;
@@ -24,7 +24,7 @@ pub const SALT_PROPOSE: u32 = 2;
 #[allow(clippy::too_many_arguments)]
 pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32, physics: &Physics) -> State {
     // Read: `seen` is the neighbors' published state; the live state starts as my own.
-    let mut live = State { offer: None, accept: None, grant: false, ..me };
+    let mut live = State { offer: None, accept: None, ..me };
     // An offer I published this phase is evaluated this phase; its particle stays committed.
     let committed = me.offer.is_some();
 
@@ -41,20 +41,19 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
 }
 
 /// Resolve: the offer I published last phase has its verdict now, in the neighbor's acceptance.
-/// Accepted, the particle has moved: I am left vacuum, or granted an air if it overwrote one.
+/// Accepted, the particle has moved: I am left vacuum.
 /// Rejected, I keep my particle and its velocity.
 fn resolve(live: &mut State, kept: State, seen: &[State; 6]) {
     let Some(d) = kept.offer else { return };
     let verdict = seen[d as usize];
     if verdict.accept == Some(d.opposite()) {
-        *live = State::holding(if verdict.grant { Material::Air } else { Material::Vacuum });
+        *live = State::VACUUM;
     }
 }
 
 /// Evaluate: every offer that targets me, selected one at a time biased by the physics
 /// distribution (heavier particles and better-aligned moves first). The first whose conditions
-/// hold is accepted: its particle moves in, with gravity's impulse, overwriting an air (granting
-/// one to its origin) or filling vacuum. My capacity is then filled, so the conditions of the rest
+/// hold is accepted: its particle moves in, with gravity's impulse, filling the vacuum. My capacity is then filled, so the conditions of the rest
 /// fail and they are rejected, by not being named.
 fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
@@ -66,7 +65,6 @@ fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phy
     }
     let Some(i) = select(&weights, hash(x, y, phase, SALT_EVALUATE)) else { return };
     let origin = seen[i];
-    live.grant = live.material == Material::Air;
     live.material = origin.material;
     live.velocity = physics.moved(origin.material, origin.velocity);
     live.accept = Some(Dir::ALL[i]);

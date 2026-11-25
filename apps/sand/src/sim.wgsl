@@ -7,7 +7,7 @@
 // doesn't overwrite until it reaches p + 2, so cells run in any order and in place.
 // A state (`State::encode`): the material in bits 0-2 (0 air, 1 sand, 2 bedrock, 3 vacuum,
 // 4 slate, 5 water), the offer in bits 3-5 and the acceptance in bits 6-8 (1 + a direction, or 0
-// for none), the grant in bit 9. A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
+// for none). A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
@@ -16,8 +16,6 @@ struct Params {
     width: i32,
     height: i32,
     stamps: u32,
-    sand_into_air: u32,
-    water_into_air: u32,
     gravity: u32,
     mass_air: u32,
     mass_water: u32,
@@ -27,8 +25,6 @@ struct Params {
     into_sand: u32,
     into_vacuum: u32,
     _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
 }
 
 // A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
@@ -112,7 +108,6 @@ struct State {
     // 1 + a direction, or 0 for none.
     offer: u32,
     accept: u32,
-    grant: u32,
 }
 
 // `Material::decode`: the codes past water read as vacuum.
@@ -131,11 +126,11 @@ fn decode(bits: u32, v: u32) -> State {
     if accept == 7u {
         accept = 0u;
     }
-    return State(material, velocity, offer, accept, (bits >> 9u) & 1u);
+    return State(material, velocity, offer, accept);
 }
 
 fn encode(s: State) -> u32 {
-    return s.material | (s.offer << 3u) | (s.accept << 6u) | (s.grant << 9u);
+    return s.material | (s.offer << 3u) | (s.accept << 6u);
 }
 
 fn encode_velocity(v: vec2<i32>) -> u32 {
@@ -148,7 +143,7 @@ fn holding(m: u32) -> State {
     if moves(m) {
         v = vec2(0, SCALE);
     }
-    return State(m, v, 0u, 0u, 0u);
+    return State(m, v, 0u, 0u);
 }
 
 fn moves(m: u32) -> bool {
@@ -181,46 +176,36 @@ fn mass(m: u32) -> u32 {
     }
 }
 
-// `Physics::compatible`.
-fn compatible(origin: u32, dest: u32) -> bool {
-    if origin == SAND && dest == SAND {
-        return params.into_sand > 0u;
+// `Physics::factor`: the weight multiplier for offering into a cell holding dest.
+fn factor(dest: u32) -> u32 {
+    var f = 0u;
+    if dest == AIR {
+        f = params.into_air;
+    } else if dest == WATER {
+        f = params.into_water;
+    } else if dest == SAND {
+        f = params.into_sand;
+    } else if dest == VACUUM {
+        f = params.into_vacuum;
     }
-    if origin == SAND && dest == WATER {
-        return params.into_water > 0u;
-    }
-    return accepts(origin, dest);
+    return min(f, FACTOR_CAP);
 }
 
-// `Physics::accepts`.
+// `Physics::compatible`: moving particles offer into vacuum, or into another moving particle whose
+// weight multiplier isn't zero.
+fn compatible(origin: u32, dest: u32) -> bool {
+    return moves(origin) && (dest == VACUUM || (moves(dest) && factor(dest) > 0u));
+}
+
+// `Physics::accepts`: only into vacuum.
 fn accepts(origin: u32, dest: u32) -> bool {
-    if dest == VACUUM {
-        return moves(origin);
-    }
-    if origin == SAND && dest == AIR {
-        return params.sand_into_air != 0u;
-    }
-    if origin == WATER && dest == AIR {
-        return params.water_into_air != 0u;
-    }
-    return false;
+    return moves(origin) && dest == VACUUM;
 }
 
 // `Physics::weight`.
 fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
-    var factor = 0u;
-    if dest == AIR {
-        factor = params.into_air;
-    } else if dest == WATER {
-        factor = params.into_water;
-    } else if dest == SAND {
-        factor = params.into_sand;
-    } else if dest == VACUUM {
-        factor = params.into_vacuum;
-    }
-    factor = min(factor, FACTOR_CAP);
     let a = min(u32(max(along(v, d), 0)), ALONG_CAP);
-    return factor * min(mass(m), MASS_CAP) * ((a * a) >> 8u);
+    return factor(dest) * min(mass(m), MASS_CAP) * ((a * a) >> 8u);
 }
 
 // `Physics::moved`: gravity's impulse, added on a move, then back to the steady scale.
@@ -254,19 +239,18 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     var live = me;
     live.offer = 0u;
     live.accept = 0u;
-    live.grant = 0u;
     let committed = me.offer != 0u;
 
-    // Resolve: the offer kept back has its verdict now. Accepted: left vacuum, or granted an air.
+    // Resolve: the offer kept back has its verdict now. Accepted: left vacuum.
     if kept.offer != 0u {
         let d = kept.offer - 1u;
         let verdict = (*seen)[d];
         if verdict.accept == opposite(d) + 1u {
-            live = holding(select(VACUUM, AIR, verdict.grant == 1u));
+            live = holding(VACUUM);
         }
     }
 
-    // Evaluate: select one offer whose conditions hold; it overwrites, with gravity's impulse.
+    // Evaluate: select one offer whose conditions hold; it fills the vacuum, with gravity's impulse.
     if !committed {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
@@ -278,7 +262,6 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
         let i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE));
         if i != 0u {
             let origin = (*seen)[i - 1u];
-            live.grant = select(0u, 1u, live.material == AIR);
             live.material = origin.material;
             live.velocity = moved(origin.material, origin.velocity);
             live.accept = i;
@@ -347,11 +330,10 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&cells[4 * i + 3 - parity], encode_velocity(s.velocity));
 }
 
-// The brush (`World::paint`), between phases: sand, water and slate go only into cells holding
-// air or vacuum;
-// erasing (air) and vacuum replace anything but bedrock; a painted particle intends to move down. Cells engaged in a contract (an
-// offer out, one awaiting its verdict, or a particle in transport) are left alone. Stamps apply
-// in order.
+// The brush (`World::paint`), between phases: matter goes only into cells holding vacuum; erasing
+// (vacuum) empties anything but bedrock; a painted particle intends to move down. Cells engaged in
+// a contract (an offer out, one awaiting its verdict, or a particle in transport) are left alone.
+// Stamps apply in order.
 @compute @workgroup_size(8, 8)
 fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
@@ -376,7 +358,7 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         let off = centre - vec2(stamp.x, stamp.y);
         if off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius
             && here != material && here != BEDROCK
-            && (material == AIR || material == VACUUM || here == AIR || here == VACUUM) {
+            && (material == VACUUM || here == VACUUM) {
             here = material;
             painted = true;
         }

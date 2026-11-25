@@ -111,7 +111,7 @@ impl Lattice {
                 mapped_at_creation: false,
             })
         };
-        let params = uniform("params", 64);
+        let params = uniform("params", 48);
         let view = uniform("view", 32);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
@@ -157,8 +157,6 @@ impl Lattice {
             self.width as u32,
             self.height as u32,
             stamps.len() as u32,
-            p.sand_into_air as u32,
-            p.water_into_air as u32,
             p.gravity,
             p.mass_air,
             p.mass_water,
@@ -167,8 +165,6 @@ impl Lattice {
             p.into_water,
             p.into_sand,
             p.into_vacuum,
-            0,
-            0,
             0,
         ];
         queue.write_buffer(&self.params, 0, &words(&params));
@@ -333,7 +329,7 @@ mod tests {
                     world.paint(x, y, Material::Sand);
                 }
                 if sim::hash(x, y, 0, 78).is_multiple_of(9) {
-                    world.paint(x, y, Material::Vacuum);
+                    world.paint(x, y, Material::Air);
                 }
                 if sim::hash(x, y, 0, 79).is_multiple_of(5) {
                     world.paint(x, y, Material::Water);
@@ -376,11 +372,11 @@ mod tests {
             }
         }
 
-        // The brush: matter only into air, erasing anything but bedrock, in order.
+        // The brush: matter only into vacuum, erasing anything but bedrock, in order.
         let stamps = [
             Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Sand },
             Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },
-            Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Air },
+            Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Vacuum },
             Stamp { x: 10.0, y: 10.0, radius: 3.5, material: Material::Air },
             Stamp { x: 40.0, y: 30.0, radius: 4.5, material: Material::Vacuum },
             Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Sand },

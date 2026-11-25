@@ -137,9 +137,8 @@ fn packed(world: &mut World) {
     let (w, h) = (world.width(), world.height());
     for y in 0..h {
         for x in 0..w {
-            if sim::hash(x, y, 0, 41) & 1 == 1 {
-                world.paint(x, y, Material::Sand);
-            }
+            let m = if sim::hash(x, y, 0, 41) & 1 == 1 { Material::Sand } else { Material::Air };
+            world.paint(x, y, m);
         }
     }
 }
@@ -179,10 +178,10 @@ fn silo(world: &mut World, leak: Leak, outside: Outside) {
     for y in 0..h {
         for x in 0..w {
             let fill = match outside {
-                Outside::Air => None,
-                Outside::Vacuum => Some(Material::Vacuum),
-                Outside::LimitedAir => (y < h - h / 8).then_some(Material::Vacuum),
-                Outside::Water => (y >= h - h / 5).then_some(Material::Water),
+                Outside::Air => Some(Material::Air),
+                Outside::Vacuum => None,
+                Outside::LimitedAir => (y >= h - h / 8).then_some(Material::Air),
+                Outside::Water => Some(if y >= h - h / 5 { Material::Water } else { Material::Air }),
             };
             if let Some(m) = fill {
                 world.paint(x, y, m);
@@ -190,18 +189,18 @@ fn silo(world: &mut World, leak: Leak, outside: Outside) {
         }
     }
     for y in top..=bottom {
-        world.paint(left, y, Material::Air);
-        world.paint(right, y, Material::Air);
+        world.paint(left, y, Material::Vacuum);
+        world.paint(right, y, Material::Vacuum);
         world.paint(left, y, Material::Slate);
         world.paint(right, y, Material::Slate);
     }
     for x in left..=right {
-        world.paint(x, bottom, Material::Air);
+        world.paint(x, bottom, Material::Vacuum);
         world.paint(x, bottom, Material::Slate);
     }
     for y in top..bottom {
         for x in left + 1..right {
-            world.paint(x, y, Material::Air);
+            world.paint(x, y, Material::Vacuum);
             world.paint(x, y, Material::Sand);
         }
     }
@@ -212,7 +211,7 @@ fn silo(world: &mut World, leak: Leak, outside: Outside) {
         Leak::Side => vec![(right, bottom - 2), (right, bottom - 1)],
     };
     for (x, y) in holes {
-        world.paint(x, y, Material::Air);
+        world.paint(x, y, Material::Vacuum);
         world.paint(x, y, Material::Sand);
     }
 }
@@ -229,7 +228,6 @@ fn fill_vacuum(world: &mut World) {
 fn water_drop(world: &mut World) {
     fill_vacuum(world);
     let (w, h) = (world.width(), world.height());
-    world.paint(w / 2, h / 2, Material::Air);
     world.paint(w / 2, h / 2, Material::Water);
 }
 
@@ -268,7 +266,7 @@ fn pour(phase: u32, w: i32, _: i32, out: &mut Vec<Stamp>) {
 /// ```
 ///
 /// After the header, one line per row, top first: runs of a count (omitted when 1) and a glyph
-/// from `sim::debug::glyph`. Trailing air and missing rows are air.
+/// from `sim::debug::glyph`. Trailing vacuum and missing rows are vacuum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Painting {
     pub width: i32,
@@ -299,7 +297,7 @@ impl Painting {
         }
         for y in 0..self.height {
             let row: Vec<Material> = (0..self.width).map(|x| self.material(x, y)).collect();
-            let end = row.iter().rposition(|&m| m != Material::Air).map_or(0, |i| i + 1);
+            let end = row.iter().rposition(|&m| m != Material::Vacuum).map_or(0, |i| i + 1);
             let mut x = 0;
             while x < end {
                 let run = row[x..end].iter().take_while(|&&m| m == row[x]).count();
@@ -328,7 +326,7 @@ impl Painting {
             return Err(format!("bad size `{size}`"));
         }
         let mut about = String::new();
-        let mut cells = vec![Material::Air; (width * height) as usize];
+        let mut cells = vec![Material::Vacuum; (width * height) as usize];
         let mut y = 0;
         for line in lines {
             if let Some(a) = line.strip_prefix("about") {
@@ -366,7 +364,7 @@ impl Painting {
         for y in 0..h {
             for x in 0..w {
                 let m = self.material(x * self.width / w, y * self.height / h);
-                if m != Material::Air {
+                if m != Material::Vacuum {
                     world.paint(x, y, m);
                 }
             }
@@ -415,7 +413,7 @@ mod tests {
     fn painting_round_trips_through_text() {
         let mut world = World::new(30, 20);
         find("packed").unwrap().build(&mut world);
-        world.paint(0, 19, Material::Air);
+        world.paint(0, 19, Material::Vacuum);
         world.paint(0, 19, Material::Bedrock);
         let painting = Painting::of(&world, "  the packed lattice ");
         let text = painting.to_text();
@@ -440,7 +438,7 @@ mod tests {
         assert_eq!(world.material(0, 0), Material::Sand);
         assert_eq!(world.material(3, 1), Material::Air);
         assert_eq!(world.material(1, 3), Material::Bedrock);
-        assert_eq!(world.material(3, 3), Material::Air);
+        assert_eq!(world.material(3, 3), Material::Vacuum, "missing cells are vacuum");
     }
 
     #[test]
