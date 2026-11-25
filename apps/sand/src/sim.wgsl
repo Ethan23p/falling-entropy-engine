@@ -263,7 +263,7 @@ fn current(i: i32) -> i32 {
     return select(1, 0, ((even - odd) & PHASE_MASK) == 1u);
 }
 
-fn read(i: i32, parity: i32) -> State {
+fn load_state(i: i32, parity: i32) -> State {
     return decode(atomicLoad(&cells[4 * i + parity]) & STATE_MASK, atomicLoad(&cells[4 * i + 2 + parity]));
 }
 
@@ -292,10 +292,10 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
         if (atomicLoad(&cells[4 * ni + parity]) >> STATE_BITS) != phase {
             return; // a neighbor is behind
         }
-        seen[d] = read(ni, parity);
+        seen[d] = load_state(ni, parity);
     }
-    let me = read(i, parity);
-    let kept = read(i, 1 - parity);
+    let me = load_state(i, parity);
+    let kept = load_state(i, 1 - parity);
     let ahead = (phase + 1u) & PHASE_MASK;
     let s = next(me, kept, &seen, x, y, phase);
     atomicStore(&cells[4 * i + 1 - parity], encode(s) | (ahead << STATE_BITS));
@@ -315,8 +315,8 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let i = y * params.width + x;
     let parity = current(i);
-    let now = read(i, parity);
-    let kept = read(i, 1 - parity);
+    let now = load_state(i, parity);
+    let kept = load_state(i, 1 - parity);
     if now.offer != 0u || now.accept != 0u || kept.offer != 0u {
         return;
     }
