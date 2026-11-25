@@ -15,7 +15,7 @@ Ethan designs; Claude engineers (code, tooling, verification).
 - Implement the doc as written. Add no constraint it doesn't state; how a stage does its job is Claude's to fill, not a gap to flag.
 - Design decisions (physics, materials, rules, feel) are settled with Ethan: bring two or three options and a recommendation.
 - Behavior is found, not prescribed: set up the causes and let the sim judge.
-- Ask before pushing or merging (merging to `main` deploys). A push goes on its own branch, through a PR Claude opens and, once Ethan agrees, merges.
+- One branch per feature, merged through a PR. When we're working together and the change is settled, Claude opens and merges the PR itself.
 
 ## Workflow
 
