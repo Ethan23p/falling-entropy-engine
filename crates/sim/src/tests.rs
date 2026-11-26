@@ -268,9 +268,11 @@ fn encoding_state_round_trips() {
         for velocity in velocities {
             for offer in [None, Some(Dir::Up), Some(Dir::UpLeft)] {
                 for accept in [None, Some(Dir::Down), Some(Dir::UpRight)] {
-                    let s = State { material, velocity, offer, accept };
-                    assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
-                    assert!(s.encode() < 1 << 19, "19 bits");
+                    for reject in [0, 1, 0b101010, 63] {
+                        let s = State { material, velocity, offer, accept, reject };
+                        assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
+                        assert!(s.encode() < 1 << 19, "19 bits");
+                    }
                 }
             }
         }
@@ -405,7 +407,8 @@ fn propose_a_committed_particle_proposes_nothing_new() {
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     for phase in 0..50 {
         let s = next(me, State::AIR, seen, 2, 2, phase, &Physics::default());
-        assert_eq!(s, sand(DOWN), "the offer is cleared from the published state; the particle stays");
+        let rejected = State { reject: 1 << Dir::Up as u8, ..sand(DOWN) };
+        assert_eq!(s, rejected, "the offer is cleared from the published state; the particle stays");
     }
 }
 
@@ -481,24 +484,23 @@ fn evaluate_air_gives_way_to_sand_but_not_to_air() {
 }
 
 #[test]
-fn evaluate_air_with_its_offer_out_still_gives_way_to_sand() {
-    // Capacity alone decides what evaluate entertains: committed air is still insubstantial.
+fn evaluate_committed_air_rejects_sand() {
+    // A contract ties up the resources it deals in: air with its offer out is reserved, so it
+    // rejects the sand, explicitly.
     let me = State { offer: Some(Dir::DownLeft), ..State::AIR };
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(me, State::AIR, seen, 2, 2, 1, &Physics::default());
-    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
+    assert_eq!((s.material, s.accept, s.rejected(Dir::Up)), (Material::Air, None, true));
 }
 
 #[test]
-fn resolve_an_offer_of_air_that_was_overwritten_keeps_the_sand() {
-    // The air I offered is gone, sand is here now; resolving the air's offer doesn't lose it.
-    let kept = State { offer: Some(Dir::Down), ..State::AIR };
-    let me = State { accept: Some(Dir::Up), ..sand(DOWN) };
-    for accept in [Some(Dir::Up), None] {
-        let seen = around(&[(Dir::Down, State { accept, ..State::AIR })]);
-        let s = next(me, kept, seen, 2, 2, 0, &Physics::default());
-        assert_eq!(s.material, Material::Sand);
-    }
+fn resolve_an_offer_with_no_verdict_yet_stands() {
+    // The target names me in neither its acceptance nor its rejections: my offer stands, its
+    // particle still committed, and I propose nothing new.
+    let kept = offering(Dir::Down, DOWN);
+    let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..State::VACUUM })]);
+    let s = next(sand(DOWN), kept, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.velocity, s.offer), (Material::Sand, DOWN, Some(Dir::Down)));
 }
 
 #[test]
@@ -518,7 +520,7 @@ fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
     for holding in Material::ALL {
         for offered in [Material::Air, Material::Water, Material::Sand] {
             let room = holding == Material::Vacuum || (holding == Material::Air && offered != Material::Air);
-            assert_eq!(p.entertains(offered, holding), room, "{offered:?} into {holding:?}");
+            assert_eq!(p.entertains(offered, holding, false), room, "{offered:?} into {holding:?}");
         }
     }
 }
@@ -580,7 +582,7 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     let p = Physics::default();
     let v = Velocity { x: 100, y: 256 };
     let kept = offering(Dir::Down, v);
-    let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..sand(DOWN) })]);
+    let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), reject: 1 << Dir::Up as u8, ..sand(DOWN) })]);
     let s = next(sand(v), kept, seen, 2, 2, 0, &p);
     assert_eq!(s.material, Material::Sand);
     assert_eq!(s.velocity, deflect(&p, Material::Sand, v, Dir::Down, 0));
@@ -605,10 +607,12 @@ fn contract_terms_pair_each_verdict_with_an_effect_on_each_end() {
     let air = State { offer: Some(Dir::Down), ..State::AIR };
     assert_eq!(offer.terms(Verdict::Accepted, air, 7), (Effect::Spawn, Effect::Receive { from: Dir::Up, origin: air }));
     assert_eq!(offer.terms(Verdict::Rejected, origin, 7), (Effect::Deflect { from: Dir::Down, bits: 7 }, Effect::None));
-    // The origin reads the verdict from the target: accepted only when the target names it.
-    assert_eq!(offer.verdict(State { accept: Some(Dir::Up), ..State::AIR }), Verdict::Accepted);
-    assert_eq!(offer.verdict(State { accept: Some(Dir::UpLeft), ..State::AIR }), Verdict::Rejected);
-    assert_eq!(offer.verdict(State::VACUUM), Verdict::Rejected);
+    // The origin reads the verdict from the target: accepted when its acceptance names the origin,
+    // rejected when its rejections do, and no verdict yet otherwise.
+    assert_eq!(offer.verdict(State { accept: Some(Dir::Up), ..State::AIR }), Some(Verdict::Accepted));
+    assert_eq!(offer.verdict(State { reject: 1 << Dir::Up as u8, ..State::AIR }), Some(Verdict::Rejected));
+    assert_eq!(offer.verdict(State { accept: Some(Dir::UpLeft), ..State::AIR }), None);
+    assert_eq!(offer.verdict(State::VACUUM), None);
 }
 
 #[test]

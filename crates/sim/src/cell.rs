@@ -9,14 +9,16 @@ use crate::{Dir, Material, Velocity};
 ///
 /// - `offer`: an offer this cell authored, as origin, to the neighbor toward that direction. Its
 ///   particle is committed to it until the cell resolves it.
-/// - `accept`: this cell's verdict, as target, on the offers it evaluated: it names the origin whose
-///   offer it accepted. Every other offer that targeted it then was rejected.
+/// - `accept` and `reject`: this cell's verdicts, as target, on the offers it evaluated: `accept`
+///   names the origin whose offer it accepted, and `reject` the origins whose offers it rejected
+///   (one bit per direction, `Dir as usize`). An offer with neither has no verdict yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
     pub material: Material,
     pub velocity: Velocity,
     pub offer: Option<Dir>,
     pub accept: Option<Dir>,
+    pub reject: u8,
 }
 
 impl State {
@@ -28,14 +30,19 @@ impl State {
     /// A fresh particle that moves intends to move down.
     pub const fn holding(material: Material) -> State {
         let velocity = if material.moves() { Velocity::DOWN } else { Velocity::ZERO };
-        State { material, velocity, offer: None, accept: None }
+        State { material, velocity, offer: None, accept: None, reject: 0 }
     }
 
     /// Bits 0-2 the material, 3-5 the offer and 6-8 the acceptance (1 + a direction, or 0 for
-    /// none). The velocity has a word of its own (`Velocity::encode`).
+    /// none), 9-14 the rejections. The velocity has a word of its own (`Velocity::encode`).
     pub fn encode(self) -> u32 {
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
-        self.material as u32 | dir(self.offer) << 3 | dir(self.accept) << 6
+        self.material as u32 | dir(self.offer) << 3 | dir(self.accept) << 6 | ((self.reject & 63) as u32) << 9
+    }
+
+    /// Whether this cell rejected the offer from the neighbor toward `d`.
+    pub fn rejected(self, d: Dir) -> bool {
+        self.reject >> d as u32 & 1 == 1
     }
 
     pub fn decode(bits: u32, velocity: u32) -> State {
@@ -48,6 +55,7 @@ impl State {
             velocity: Velocity::decode(velocity),
             offer: dir(bits >> 3),
             accept: dir(bits >> 6),
+            reject: (bits >> 9 & 63) as u8,
         }
     }
 

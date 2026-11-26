@@ -30,7 +30,7 @@
 //! - A proposes it in its update at phase `p - 1`: A publishes `offer` (toward B) at `p`, and its
 //!   particle is committed.
 //! - B evaluates it in its update at `p`, and publishes its verdict at `p + 1`: `accept` naming A,
-//!   or a rejection, by not naming A. Meanwhile A, committed, proposes nothing new. It still
+//!   or `reject` naming A. Every offer B evaluates gets one or the other. Meanwhile A, committed, proposes nothing new. It still
 //!   evaluates, and the capacity limit decides: a committed substantial particle fills the cell, but
 //!   committed air can be overwritten, and then A's offer finds its air gone and has no effect.
 //! - A resolves it in its update at `p + 1`, reading B's verdict. The offer is in A's kept-back
@@ -81,9 +81,16 @@ impl Offer {
     }
 
     /// The verdict, as the origin reads it from the target's published state: accepted if the
-    /// target names this cell, rejected otherwise.
-    pub fn verdict(self, target: State) -> Verdict {
-        if target.accept == Some(self.toward.opposite()) { Verdict::Accepted } else { Verdict::Rejected }
+    /// target's acceptance names this cell, rejected if its rejections do, and none yet otherwise.
+    pub fn verdict(self, target: State) -> Option<Verdict> {
+        let me = self.toward.opposite();
+        if target.accept == Some(me) {
+            Some(Verdict::Accepted)
+        } else if target.rejected(me) {
+            Some(Verdict::Rejected)
+        } else {
+            None
+        }
     }
 
     /// The terms: the effects on (origin, target) under each condition. `origin` is the origin's
