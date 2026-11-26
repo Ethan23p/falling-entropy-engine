@@ -82,7 +82,7 @@ fn propose(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phys
     let mut weights = [0; 6];
     for d in Dir::ALL {
         let target = seen[d as usize].material;
-        if physics.offers_to(live.material, target) {
+        if physics.offers_to(live.material, live.velocity, d, target) {
             weights[d as usize] = physics.weight(live.material, live.velocity, d, target);
         }
     }
