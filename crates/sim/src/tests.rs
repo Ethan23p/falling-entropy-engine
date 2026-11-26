@@ -269,9 +269,11 @@ fn encoding_state_round_trips() {
             for offer in [None, Some(Dir::Up), Some(Dir::UpLeft)] {
                 for accept in [None, Some(Dir::Down), Some(Dir::UpRight)] {
                     for (reject, waits) in [(0, false), (1, true), (0b101010, false), (63, true)] {
-                        let s = State { material, velocity, offer, accept, reject, waits };
-                        assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
-                        assert!(s.encode() < 1 << 19, "19 bits");
+                        for (request, gives) in [(None, false), (Some(Dir::DownLeft), true), (Some(Dir::Up), false)] {
+                            let s = State { material, velocity, offer, accept, reject, request, gives, waits };
+                            assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
+                            assert!(s.encode() < 1 << 20, "20 bits");
+                        }
                     }
                 }
             }
@@ -285,10 +287,10 @@ fn encoding_a_cell_keeps_words_per_phase_parity() {
     // so the words a neighbor at p reads stay put until p + 2.
     let mut w = World::new(3, 3);
     w.paint(1, 0, Material::Bedrock);
-    const { assert!(STATE_MASK == (1 << 19) - 1 && PHASE_MASK == (1 << 13) - 1 && WORDS == 4) };
+    const { assert!(STATE_MASK == (1 << 20) - 1 && PHASE_MASK == (1 << 12) - 1 && WORDS == 4) };
     w.step();
     let words = &w.words()[WORDS..2 * WORDS];
-    assert_eq!((words[0] >> 19, words[1] >> 19), (0, 1));
+    assert_eq!((words[0] >> 20, words[1] >> 20), (0, 1));
     assert_eq!(State::decode(words[0] & STATE_MASK, words[2]), State::BEDROCK);
     assert_eq!((w.kept(1, 0), w.cell(1, 0)), (State::BEDROCK, State::BEDROCK));
 }
@@ -326,8 +328,10 @@ fn around(with: &[(Dir, State)]) -> [State; 6] {
     out
 }
 
-/// How often, over many phases, a cell's update proposes toward each direction (and nowhere, last).
+/// How often, over many phases, a cell's update offers toward each direction (and nowhere, last),
+/// in phases it proposes an offer (requests off).
 fn proposals(me: State, seen: [State; 6], physics: &Physics) -> [u32; 7] {
+    let physics = &Physics { request_odds: 0, ..*physics };
     let mut out = [0; 7];
     for phase in 0..4000 {
         let s = next(me, State::AIR, seen, 5, 5, phase, physics);
@@ -765,7 +769,7 @@ fn movement_a_heap_holds_its_slope_and_nearly_stills() {
     // A heap, not a layer: the middle column stands above the edges. (Sand's small deflection
     // lowered it from 6 rows of rise to 4 in v01.05; velocity's weighting keeps 4 in v01.06.)
     let top = |x: i32| (0..20).find(|&y| w.material(x, y) == Material::Sand).unwrap_or(20);
-    assert!(top(20) + 3 < top(5), "{}", w.ascii());
+    assert!(top(20) + 3 < top(5), "rise {} - {}\n{}", top(5), top(20), w.ascii());
 }
 
 // Slate
@@ -880,4 +884,118 @@ fn movement_water_seeks_its_level_where_sand_heaps() {
     // (v01.06: the heap is steep-sided, so its rise is measured out at the edge, column 2.)
     let top = |x: i32| (0..20).find(|&y| s.material(x, y) == Material::Sand).unwrap_or(20);
     assert!(top(20) + 3 < top(2), "{}", s.ascii());
+}
+
+// Requests
+
+/// Physics where every proposal is a request.
+fn always_requesting() -> Physics {
+    Physics { request_odds: 1, ..Physics::default() }
+}
+
+#[test]
+fn propose_a_request_one_phase_in_request_odds() {
+    // Air with sand all around: it offers or requests; requests come about one phase in six.
+    let (mut offers, mut requests) = (0, 0);
+    for phase in 0..6000 {
+        let s = next(State::AIR, State::VACUUM, [sand(DOWN); 6], 5, 5, phase, &Physics::default());
+        offers += s.offer.is_some() as u32;
+        requests += s.request.is_some() as u32;
+    }
+    assert!((800..1200).contains(&requests), "{requests} requests, {offers} offers");
+    assert_eq!(offers + requests, 6000, "air offers into sand, unlikely but not excluded");
+}
+
+#[test]
+fn propose_a_request_asks_the_neighbor_whose_velocity_points_here() {
+    // Sand falling above, sand falling below: the one above points here.
+    let seen = around(&[(Dir::Up, sand(FALLING)), (Dir::Down, sand(FALLING)), (Dir::DownLeft, State::BEDROCK)]);
+    let mut counts = [0; 7];
+    for phase in 0..2000 {
+        let s = next(State::VACUUM, State::VACUUM, seen, 5, 5, phase, &always_requesting());
+        counts[s.request.map_or(6, |d| d as usize)] += 1;
+    }
+    assert!(counts[Dir::Up as usize] > 1900, "{counts:?}");
+    assert_eq!(counts[Dir::DownLeft as usize], 0, "bedrock has nothing to give: {counts:?}");
+}
+
+#[test]
+fn propose_no_request_without_room() {
+    // Sand has no room for another particle; air has none for air.
+    let s = next(sand(DOWN), State::VACUUM, [sand(DOWN); 6], 5, 5, 0, &always_requesting());
+    assert_eq!((s.offer, s.request), (None, None));
+    let s = next(State::AIR, State::VACUUM, [State::AIR; 6], 5, 5, 0, &always_requesting());
+    assert_eq!((s.offer, s.request), (None, None));
+}
+
+#[test]
+fn evaluate_a_request_is_accepted_and_the_particle_given() {
+    // Vacuum below requests my sand: I accept, still holding it, committed to the transfer.
+    let seen = around(&[(Dir::Down, State { request: Some(Dir::Up), ..State::VACUUM })]);
+    let s = next(sand(DOWN), State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.gives), (Material::Sand, Some(Dir::Down), true));
+    assert_eq!((s.offer, s.request), (None, None), "a given particle proposes nothing");
+    assert_eq!(s.counts_as(), Material::Sand, "the giver counts it until it resolves");
+}
+
+#[test]
+fn evaluate_a_tied_up_particle_rejects_a_request() {
+    let seen = around(&[(Dir::Down, State { request: Some(Dir::Up), ..State::VACUUM })]);
+    let s = next(offering(Dir::DownLeft, DOWN), State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.accept, s.reject), (None, 1 << Dir::Down as u8));
+}
+
+#[test]
+fn evaluate_capacity_tied_up_in_a_request_rejects_offers() {
+    let me = State { request: Some(Dir::Down), ..State::VACUUM };
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(me, State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.reject), (Material::Vacuum, None, 1 << Dir::Up as u8));
+}
+
+#[test]
+fn evaluate_a_matched_pair_is_accepted_automatically() {
+    // I request from above while above offers to me: I accept its offer.
+    let me = State { request: Some(Dir::Up), ..State::VACUUM };
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(me, State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.reject), (Material::Sand, Some(Dir::Up), 0));
+    // And above, offering to me while I request it, gives my request no verdict of its own.
+    let seen = around(&[(Dir::Down, State { request: Some(Dir::Up), ..State::VACUUM })]);
+    let s = next(offering(Dir::Down, DOWN), State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.accept, s.reject, s.gives), (None, 0, false));
+}
+
+#[test]
+fn resolve_an_accepted_request_takes_the_particle_and_the_giver_lets_it_go() {
+    let p = Physics::default();
+    let kept = State { request: Some(Dir::Up), ..State::AIR };
+    let giver = State { accept: Some(Dir::Down), gives: true, ..sand(DOWN) };
+    let s = next(State::AIR, kept, around(&[(Dir::Up, giver)]), 2, 2, 0, &p);
+    assert_eq!((s.material, s.velocity), (Material::Sand, p.moved(Material::Sand, DOWN)));
+    assert_eq!(s.accept, None, "the taker counts the particle from now on");
+    let s = next(giver, State::VACUUM, around(&[]), 2, 2, 0, &p);
+    assert_eq!(s.counts_as(), Material::Vacuum);
+    // Given air spawns a new air.
+    let s =
+        next(State { accept: Some(Dir::Down), gives: true, ..State::AIR }, State::VACUUM, [State::AIR; 6], 2, 2, 0, &p);
+    assert_eq!(s.material, Material::Air);
+}
+
+#[test]
+fn resolve_a_rejected_request_frees_the_capacity_and_one_with_no_verdict_stands() {
+    let p = Physics::default();
+    let kept = State { request: Some(Dir::Up), ..State::VACUUM };
+    let s = next(
+        State::VACUUM,
+        kept,
+        around(&[(Dir::Up, State { reject: 1 << Dir::Down as u8, ..sand(DOWN) })]),
+        2,
+        2,
+        0,
+        &p,
+    );
+    assert_eq!((s.material, s.request), (Material::Vacuum, None));
+    let s = next(State::VACUUM, kept, around(&[(Dir::Up, sand(DOWN))]), 2, 2, 0, &p);
+    assert_eq!(s.request, Some(Dir::Up));
 }

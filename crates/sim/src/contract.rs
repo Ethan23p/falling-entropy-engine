@@ -21,10 +21,18 @@
 //! (`physics::Properties`): a rejected sand particle deflects a little (forced on down a hill),
 //! water a lot (it spreads on collision). Deflection is a first cut, to iterate on.
 //!
-//! Only **offers** are built so far: contracts authored by the origin, which pre-commit the particle
-//! they propose to transfer. The doc's **requests** (authored by the target, reserving its capacity)
-//! and **matched pairs** (one contract proposed by both ends in the same phase, accepted
-//! automatically and resolved on both ends) aren't built yet.
+//! A **request** is the mirror: authored by the target, asking the origin to transfer its particle
+//! in. It can't pre-commit that particle; what it ties up is the requester's capacity
+//! (`Request::terms`):
+//!
+//! | Condition | Effect on the origin (the holder) | Effect on the target (the requester) |
+//! |---|---|---|
+//! | Accepted | `Give`: its particle is committed to the transfer; then, when it resolves, `Release` (or `Spawn` for air) | `Take`: holds the particle, with gravity's impulse |
+//! | Rejected | none | none: its capacity is free again |
+//!
+//! A **matched pair** is one transfer proposed by both ends in the same phase: an offer from A to B
+//! while B requests from A. It is accepted automatically: B accepts the offer, and A gives the
+//! request no verdict of its own.
 //!
 //! The timing of an offer from A to its neighbor B, in published state:
 //! - A proposes it in its update at phase `p - 1`: A publishes `offer` (toward B) at `p`, and its
@@ -38,6 +46,15 @@
 //!
 //! While the particle is in transport, both cells register as holding it; a census counts it once,
 //! at its origin (`State::counts_as`).
+//!
+//! The timing of a request from B to its neighbor A, in published state:
+//! - B proposes it in its update at phase `p - 1`: B publishes `request` (toward A) at `p`, and its
+//!   capacity is tied up.
+//! - A evaluates it in its update at `p`, and publishes its verdict at `p + 1`: `accept` naming B
+//!   with `gives` (still holding the particle, committed to B), or `reject` naming B. Meanwhile B
+//!   proposes nothing new, and rejects every offer into it but a matching one.
+//! - Both resolve in their updates at `p + 1`: B reads A's verdict from A's published state, and on
+//!   acceptance takes the particle A still publishes; A, reading its own `gives`, lets it go.
 
 use crate::{Dir, Physics, State, Velocity};
 
@@ -45,6 +62,12 @@ use crate::{Dir, Physics, State, Velocity};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Offer {
     pub toward: Dir,
+}
+
+/// A request: a contract its target authors, asking the neighbor `from` to transfer its particle in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Request {
+    pub from: Dir,
 }
 
 /// A contract's condition: the verdict on it.
@@ -67,6 +90,12 @@ pub enum Effect {
     /// The particle arrives from the origin `from`, having made a physical move: gravity's impulse
     /// is applied to its velocity. The cell's verdict names that origin.
     Receive { from: Dir, origin: State },
+    /// The cell accepts a request from the requester toward `to`: its particle is committed to the
+    /// transfer, in transport until the cell resolves it. The cell's verdict names that requester.
+    Give { to: Dir },
+    /// The particle the cell requested arrives from the origin `from` (as the origin published it,
+    /// still holding it), having made a physical move: gravity's impulse is applied to its velocity.
+    Take { origin: State },
     /// The particle stays, and its intent turns away from the target `from`, perpendicular to it, by
     /// its material's deflection: to the side it already leans or, pointing dead on, to the side
     /// `bits` picks.
@@ -106,6 +135,36 @@ impl Offer {
     }
 }
 
+impl Request {
+    /// The request a cell has out, if any: its capacity is tied up in it until it resolves.
+    pub fn of(me: State) -> Option<Request> {
+        me.request.map(|from| Request { from })
+    }
+
+    /// The verdict, as the requester reads it from the origin's published state: accepted if the
+    /// origin's acceptance names this cell, rejected if its rejections do, and none yet otherwise.
+    pub fn verdict(self, origin: State) -> Option<Verdict> {
+        let me = self.from.opposite();
+        if origin.accept == Some(me) && origin.gives {
+            Some(Verdict::Accepted)
+        } else if origin.rejected(me) {
+            Some(Verdict::Rejected)
+        } else {
+            None
+        }
+    }
+
+    /// The terms: the effects on (origin, target) under each condition. `origin` is the origin's
+    /// published state. The origin's `Give` it applies when it evaluates; the requester's `Take`
+    /// when it resolves.
+    pub fn terms(self, verdict: Verdict, origin: State) -> (Effect, Effect) {
+        match verdict {
+            Verdict::Accepted => (Effect::Give { to: self.from.opposite() }, Effect::Take { origin }),
+            Verdict::Rejected => (Effect::None, Effect::None),
+        }
+    }
+}
+
 impl Effect {
     /// Apply this effect to the cell's own live state.
     pub fn apply(self, live: &mut State, physics: &Physics) {
@@ -117,6 +176,14 @@ impl Effect {
                 live.material = origin.material;
                 live.velocity = physics.moved(origin.material, origin.velocity);
                 live.accept = Some(from);
+            }
+            Effect::Give { to } => {
+                live.accept = Some(to);
+                live.gives = true;
+            }
+            Effect::Take { origin } => {
+                live.material = origin.material;
+                live.velocity = physics.moved(origin.material, origin.velocity);
             }
             Effect::Deflect { from, bits } => {
                 let (ix, iy) = deflection(physics.deflection(live.material) as i32, live.velocity, from, bits);

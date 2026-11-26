@@ -8,8 +8,8 @@
 //! What it holds so far:
 //! - **Capacity** (evaluate's exclusion): a cell holds one particle at most, so a cell holding a
 //!   substantial particle rejects every offer of one. A cell holding nothing can take any particle,
-//!   and a cell holding air, which is insubstantial, a substantial one, unless that air is tied up
-//!   in an offer of its own (`entertains`).
+//!   and a cell holding air, which is insubstantial, a substantial one, unless its capacity is tied
+//!   up in an offer or a request of its own (`entertains`).
 //! - **Movement** (propose): a particle intends to move along its velocity. Which neighbors are
 //!   incompatible with it? Only the physically impossible: nothing, or a static particle, offers,
 //!   and nothing offers into a static particle (`offers_to`). Which does it most prefer? Weights
@@ -22,6 +22,9 @@
 //! - **Air and vacuum**: when a cell holding air shares a neighborhood with a cell holding vacuum,
 //!   the air offers into the vacuum (`air_meets_vacuum`). On acceptance it spawns itself a new air
 //!   (`contract`).
+//! - **Requests** (propose): a cell proposes a request instead of an offer by chance, one phase in
+//!   `request_odds`. It asks a neighbor whose particle it has room for (`requests_from`), selected
+//!   by how strongly that particle's velocity points at it (`preference`).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
 //!   mass (`moved`).
 
@@ -49,6 +52,8 @@ pub struct Physics {
     pub gravity: u32,
     /// The magnitude a velocity approaches, asymptotically, as impulses add to it.
     pub ceiling: u32,
+    /// The chance a cell proposes a request instead of an offer: one phase in this many (0: never).
+    pub request_odds: u32,
     /// Each material's properties, indexed by its encoded value (`Material as usize`).
     pub materials: [Properties; 6],
 }
@@ -64,7 +69,7 @@ impl Default for Physics {
         set(Material::Sand, 4, 1, 2);
         set(Material::Slate, 8, 0, 0);
         set(Material::Bedrock, 16, 0, 0);
-        Physics { gravity: 64, ceiling: 1024, materials }
+        Physics { gravity: 64, ceiling: 1024, request_odds: 6, materials }
     }
 }
 
@@ -118,14 +123,25 @@ impl Physics {
         m == Material::Air && seen.iter().any(|s| s.material == Material::Vacuum)
     }
 
+    /// Propose's exclusion for a request: a cell holding `holding` asks only for a particle of `m`
+    /// it has room for (`entertains`).
+    pub fn requests_from(&self, m: Material, holding: Material) -> bool {
+        self.entertains(m, holding, false)
+    }
+
+    /// Whether a cell proposes a request this phase rather than an offer, given its random `bits`.
+    pub fn requests(&self, bits: u32) -> bool {
+        self.request_odds != 0 && bits.is_multiple_of(self.request_odds)
+    }
+
     /// Evaluate's exclusion, the capacity limit: whether a cell whose live state holds `holding`
     /// entertains an offer of a particle of `offered`. Holding a substantial particle, it rejects
     /// every offer of one. Holding nothing, it can take any particle. Holding air, which is
-    /// insubstantial, it can take a more substantial one, and the air ceases to exist, unless the air
-    /// is `committed`: tied up in an offer of its own, its capacity is tied up too.
+    /// insubstantial, it can take a more substantial one, and the air ceases to exist. A cell that is
+    /// `committed`, tied up in an offer or a request of its own, has its capacity tied up too.
     pub fn entertains(&self, offered: Material, holding: Material, committed: bool) -> bool {
-        let room = !holding.is_particle() || (!holding.is_substantial() && offered.is_substantial() && !committed);
-        offered.moves() && room
+        let room = !holding.is_particle() || (!holding.is_substantial() && offered.is_substantial());
+        offered.moves() && room && !committed
     }
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding

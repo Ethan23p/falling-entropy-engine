@@ -12,9 +12,9 @@ use crate::{Dir, Material, Physics, State, neighbor};
 /// that parity's velocity word. A neighbor at phase `p` reads the words of `p`'s parity, which the
 /// cell doesn't overwrite until it reaches `p + 2`, so a neighbor one phase ahead still serves it
 /// (the kept-back value), and no reader needs another word in step with it.
-const STATE_BITS: u32 = 19;
+const STATE_BITS: u32 = 20;
 pub(crate) const STATE_MASK: u32 = (1 << STATE_BITS) - 1;
-/// The phase is stored in the top 13 bits and wraps; neighbors are never more than one apart.
+/// The phase is stored in the top 12 bits and wraps; neighbors are never more than one apart.
 pub const PHASE_MASK: u32 = (1 << (32 - STATE_BITS)) - 1;
 /// Words per cell: state even, state odd, velocity even, velocity odd.
 pub const WORDS: usize = 4;
@@ -135,11 +135,15 @@ impl World {
         (0..self.height).all(|y| (0..self.width).all(|x| self.phase(x, y) == p))
     }
 
-    /// Whether the cell is part of a live contract: it has an offer out, one awaiting its verdict,
-    /// or a particle in transport. The brush leaves such cells alone.
+    /// Whether the cell is part of a live contract: it has an offer or a request out, one awaiting
+    /// its verdict, or a particle in transport. The brush leaves such cells alone.
     pub fn engaged(&self, x: i32, y: i32) -> bool {
         let (now, kept) = (self.cell(x, y), self.kept(x, y));
-        now.offer.is_some() || now.accept.is_some() || kept.offer.is_some()
+        now.offer.is_some()
+            || now.request.is_some()
+            || now.accept.is_some()
+            || kept.offer.is_some()
+            || kept.request.is_some()
     }
 
     /// Overwrites the cell's current words, keeping its phase.
