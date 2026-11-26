@@ -112,21 +112,22 @@ impl Effect {
                 live.accept = Some(from);
             }
             Effect::Deflect { from, bits } => {
-                live.velocity = deflected(physics.deflection(live.material) as i32, live.velocity, from, bits)
+                let (ix, iy) = deflection(physics.deflection(live.material) as i32, live.velocity, from, bits);
+                live.velocity = physics.impelled(live.velocity, ix, iy);
             }
         }
     }
 }
 
-/// The deflected velocity: `v` turned away from `d` by `k`, perpendicular to `d`, to the side it
-/// already leans (or, dead on, the side `bits` picks), then back to the steady scale.
-pub fn deflected(k: i32, v: Velocity, d: Dir, bits: u32) -> Velocity {
+/// The deflection impulse on `v`, rejected toward `d`: `k` perpendicular to `d`, to the side it
+/// already leans (or, dead on, the side `bits` picks).
+pub fn deflection(k: i32, v: Velocity, d: Dir, bits: u32) -> (i32, i32) {
     if k == 0 {
-        return v;
+        return (0, 0);
     }
     let (sx, sy) = d.step();
     // The perpendicular (-sy, sx), and how far the velocity already leans along it.
     let lean = -(v.x as i32) * sy + v.y as i32 * sx;
     let side = if lean > 0 || (lean == 0 && bits & 1 == 1) { 1 } else { -1 };
-    Velocity::steady(v.x as i32 - side * k * sy / 2, v.y as i32 + side * k * sx / 2)
+    (-side * k * sy / 2, side * k * sx / 2)
 }

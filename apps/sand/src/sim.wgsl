@@ -21,13 +21,13 @@ struct Properties {
 }
 
 // The lattice's size and the stamp count, then the physics distribution's data (`Physics`):
-// gravity, inertia, and each material's properties, indexed by its encoded value.
+// gravity, the velocity ceiling, and each material's properties, indexed by its encoded value.
 struct Params {
     width: i32,
     height: i32,
     stamps: u32,
     gravity: u32,
-    inertia: u32,
+    ceiling: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
@@ -63,6 +63,7 @@ const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const WEIGHT_TOP: u32 = 65536u;
 const HALVINGS_CAP: u32 = 16u;
+const CEILING_CAP: u32 = 8192u;
 const DEFLECT_CAP: u32 = 1024u;
 const SCALE: i32 = 256;
 
@@ -179,15 +180,6 @@ fn moves(m: u32) -> bool {
     return is_particle(m) && !is_static(m);
 }
 
-// `Velocity::steady`: the direction of v at the steady scale; down when it has none.
-fn steady(v: vec2<i32>) -> vec2<i32> {
-    let m = max(abs(v.x), abs(v.y));
-    if m == 0 {
-        return vec2(0, SCALE);
-    }
-    return vec2(v.x * SCALE / m, v.y * SCALE / m);
-}
-
 // `Velocity::along`.
 fn along(v: vec2<i32>, d: u32) -> i32 {
     let s = step_of(d);
@@ -254,16 +246,17 @@ fn isqrt(n0: u32) -> u32 {
     return r;
 }
 
-// `Physics::preference`: halving with the turn from the velocity, as many times as inertia and
-// mass say.
+// `Physics::preference`: halving with the turn from the velocity, as many times as mass and
+// magnitude say.
 fn preference(m: u32, v: vec2<i32>, d: u32) -> u32 {
     let s = step_of(d);
+    let magnitude = isqrt(u32(v.x * v.x + v.y * v.y));
     let norm = i32(isqrt(u32((v.x * v.x + v.y * v.y) * (s.x * s.x + s.y * s.y))));
     var turn = 1024u;
     if norm != 0 {
         turn = u32(clamp(1024 - along(v, d) * 1024 / norm, 0, 2048));
     }
-    let halvings = (min(params.inertia, 256u) * mass(m) * turn) >> 4u;
+    let halvings = (mass(m) * min(magnitude, CEILING_CAP) * turn) >> 8u;
     let whole = halvings >> 10u;
     if whole >= HALVINGS_CAP {
         return 0u;
@@ -277,16 +270,32 @@ fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
     return into(dest) * mass(m) * preference(m, v, d);
 }
 
-// `Physics::moved`, gravity: its impulse, added on a move, then back to the steady scale.
+// `Physics::moved`, gravity: its impulse, added on a move.
 fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
     let impulse = i32(min(params.gravity, 4096u) * mass(m));
-    return steady(vec2(v.x, v.y + impulse));
+    return impelled(v, vec2(0, impulse));
+}
+
+// `Physics::impelled`: v with the impulse added, its gain in magnitude eased toward the ceiling.
+fn impelled(v: vec2<i32>, impulse: vec2<i32>) -> vec2<i32> {
+    let c = i32(clamp(params.ceiling, 1u, CEILING_CAP));
+    let cap = i32(CEILING_CAP);
+    let u = v + clamp(impulse, vec2(-cap), vec2(cap));
+    let before = min(i32(isqrt(u32(v.x * v.x + v.y * v.y))), c);
+    let after = i32(isqrt(u32(u.x * u.x + u.y * u.y)));
+    if after == 0 {
+        return vec2(0, SCALE);
+    }
+    var eased = after;
+    if after > before {
+        eased = before + (after - before) * (c - before) / c;
+    }
+    return vec2(u.x * eased / after, u.y * eased / after);
 }
 
 // Contract (`contract`): an offer's terms pair each condition (the verdict) with an effect on each
 // end. Accepted: the origin releases (air spawns a new air), the target receives. Rejected: the
-// origin deflects, the target does nothing. An offer whose particle is gone (air overwritten while
-// it was out) has no effect on its origin.
+// origin deflects, the target does nothing.
 
 // `Offer::verdict`: an offer toward d is accepted if the target's verdict names this cell.
 fn accepted(d: u32, dest: State) -> bool {
@@ -314,14 +323,15 @@ fn receive(live: ptr<function, State>, d: u32, origin: State) {
 // `Effect::Deflect`: the particle stays, its intent turned away from the target toward d by its
 // material's deflection.
 fn deflect(live: ptr<function, State>, d: u32, bits: u32) {
-    (*live).velocity = deflected(i32(deflection((*live).material)), (*live).velocity, d, bits);
+    let v = (*live).velocity;
+    (*live).velocity = impelled(v, deflection_of(i32(deflection((*live).material)), v, d, bits));
 }
 
-// `contract::deflected`: v turned away from d by k, perpendicular to it, to the side it already
-// leans (or the side bits picks when dead on), then back to the steady scale.
-fn deflected(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
+// `contract::deflection`: the impulse on v rejected toward d, k perpendicular to d, to the side it
+// already leans (or the side bits picks when dead on).
+fn deflection_of(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
     if k == 0 {
-        return v;
+        return vec2(0, 0);
     }
     let s = step_of(d);
     let lean = -v.x * s.y + v.y * s.x;
@@ -329,7 +339,7 @@ fn deflected(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
     if lean > 0 || (lean == 0 && (bits & 1u) == 1u) {
         side = 1;
     }
-    return steady(vec2(v.x - side * k * s.y / 2, v.y + side * k * s.x / 2));
+    return vec2(-side * k * s.y / 2, side * k * s.x / 2);
 }
 
 // Selection (`selection::select`): 1 + the index chosen, or 0 when every weight is zero.

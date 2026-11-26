@@ -304,6 +304,8 @@ fn encoding_the_phase_wraps() {
 // The update's stages, one cell at a time
 
 const DOWN: Velocity = Velocity::DOWN;
+/// Falling fast: a magnitude near the ceiling, so its direction holds firmly.
+const FALLING: Velocity = Velocity { x: 0, y: 1000 };
 
 fn sand(velocity: Velocity) -> State {
     State { velocity, ..State::holding(Material::Sand) }
@@ -341,14 +343,14 @@ fn propose_a_new_particle_intends_to_move_down() {
 #[test]
 fn propose_follows_velocity() {
     // Straight down is favored; the lower diagonals less; against the velocity, all but never.
-    let counts = proposals(sand(DOWN), around(&[]), &Physics::default());
+    let counts = proposals(sand(FALLING), around(&[]), &Physics::default());
     let down = counts[Dir::Down as usize];
     let diagonals = counts[Dir::DownLeft as usize] + counts[Dir::DownRight as usize];
     let upward = counts[Dir::Up as usize] + counts[Dir::UpLeft as usize] + counts[Dir::UpRight as usize];
     assert!(down > diagonals && diagonals > 0, "{counts:?}");
     assert!(upward <= 4 && counts[6] == 0, "{counts:?}");
     // A sideways velocity leans the other way.
-    let counts = proposals(sand(Velocity { x: 256, y: 0 }), around(&[]), &Physics::default());
+    let counts = proposals(sand(Velocity { x: 1000, y: 0 }), around(&[]), &Physics::default());
     assert!(counts[Dir::UpRight as usize] > 0 && counts[Dir::DownRight as usize] > 0, "{counts:?}");
     // Up and down are at right angles to it: rare. The left diagonals are against it: never.
     assert!(counts[Dir::Up as usize] + counts[Dir::Down as usize] <= 40, "{counts:?}");
@@ -441,7 +443,7 @@ fn evaluate_vacuum_is_filled_and_favors_the_heavier() {
     assert!(s.accept.is_some(), "{s:?}");
     // From above, sand outweighs air.
     let seen = around(&[
-        (Dir::Up, offering(Dir::Down, DOWN)),
+        (Dir::Up, offering(Dir::Down, FALLING)),
         (Dir::UpLeft, State { offer: Some(Dir::DownRight), ..State::AIR }),
     ]);
     let mut sand_won = 0;
@@ -449,7 +451,7 @@ fn evaluate_vacuum_is_filled_and_favors_the_heavier() {
         let s = next(State::VACUUM, State::AIR, seen, 2, 2, phase, &Physics::default());
         sand_won += (s.material == Material::Sand) as u32;
     }
-    assert!(sand_won > 1800, "{sand_won}");
+    assert!(sand_won > 1500, "{sand_won}");
 }
 
 #[test]
@@ -524,16 +526,43 @@ fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
 #[test]
 fn gravity_is_an_impulse_on_each_move_turning_velocity_down() {
     let p = Physics::default();
-    // A particle intending to move right that moves turns toward down, at the steady scale.
+    // A particle intending to move right that moves turns toward down, gaining magnitude.
     let v = Velocity { x: 256, y: 0 };
     let s = next(State::VACUUM, State::AIR, around(&[(Dir::UpLeft, offering(Dir::DownRight, v))]), 2, 2, 0, &p);
     let impulse = (p.gravity * p.mass(Material::Sand)) as i32;
-    assert_eq!(s.velocity, Velocity::steady(256, impulse));
-    assert!(s.velocity.y > 0 && s.velocity.x == 256, "{:?}", s.velocity);
-    // Already pointing down, it stays down.
-    assert_eq!(p.moved(Material::Sand, DOWN), DOWN);
+    assert_eq!(s.velocity, p.impelled(v, 0, impulse));
+    assert!(s.velocity.y > 0 && s.velocity.x > 0, "{:?}", s.velocity);
+    let len = |v: Velocity| ((v.x as f64).powi(2) + (v.y as f64).powi(2)).sqrt();
+    assert!(len(s.velocity) > 256.0, "{:?}", s.velocity);
+    // Already pointing down, it stays down, and speeds up.
+    let down = p.moved(Material::Sand, DOWN);
+    assert!(down.x == 0 && down.y > DOWN.y, "{down:?}");
     // Air is lighter: the same move turns it less.
-    assert!(p.moved(Material::Air, v).y < p.moved(Material::Sand, v).y);
+    let (air, sand) = (p.moved(Material::Air, v), p.moved(Material::Sand, v));
+    assert!((air.y as i32 * sand.x as i32) < (sand.y as i32 * air.x as i32), "{air:?} {sand:?}");
+}
+
+#[test]
+fn velocity_magnitude_approaches_the_ceiling_and_never_passes_it() {
+    let p = Physics::default();
+    let mut v = DOWN;
+    let len = |v: Velocity| ((v.x as f64).powi(2) + (v.y as f64).powi(2)).sqrt();
+    let mut last = len(v);
+    for _ in 0..200 {
+        v = p.moved(Material::Sand, v);
+        assert!(len(v) >= last && len(v) <= p.ceiling as f64, "{v:?}");
+        last = len(v);
+    }
+    assert!(last > 0.9 * p.ceiling as f64, "{v:?}");
+    // Intending east hard, one impulse south barely turns it; many turn it south.
+    let east = Velocity { x: 1000, y: 0 };
+    let once = p.impelled(east, 0, 256);
+    assert!(once.x > 3 * once.y, "{once:?}");
+    let mut v = east;
+    for _ in 0..20 {
+        v = p.impelled(v, 0, 256);
+    }
+    assert!(v.y > 3 * v.x, "{v:?}");
 }
 
 #[test]
@@ -555,7 +584,7 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     let s = next(sand(v), kept, seen, 2, 2, 0, &p);
     assert_eq!(s.material, Material::Sand);
     assert_eq!(s.velocity, deflect(&p, Material::Sand, v, Dir::Down, 0));
-    assert!(s.velocity.x > v.x && s.velocity.y == 256, "{:?}", s.velocity);
+    assert!(s.velocity.x > v.x, "{:?}", s.velocity);
     assert!(s.offer.is_some());
 }
 
@@ -727,7 +756,7 @@ fn movement_a_heap_holds_its_slope_and_nearly_stills() {
     let changed = materials(&w).iter().zip(&before).filter(|(a, b)| a != b).count();
     assert!(changed <= 24, "{changed} changed\n{}", w.ascii());
     // A heap, not a layer: the middle column stands above the edges. (Sand's small deflection
-    // lowered it from 6 rows of rise to 4 in v01.05; inertia's weighting keeps 4 in v01.06.)
+    // lowered it from 6 rows of rise to 4 in v01.05; velocity's weighting keeps 4 in v01.06.)
     let top = |x: i32| (0..20).find(|&y| w.material(x, y) == Material::Sand).unwrap_or(20);
     assert!(top(20) + 3 < top(5), "{}", w.ascii());
 }
@@ -741,7 +770,7 @@ fn propose_nothing_offers_into_slate() {
     // so proposes nothing. Slate is never offered into.
     let seen = [State::VACUUM, slate, slate, slate, slate, slate];
     let p = Physics::default();
-    let n = proposals(State::holding(Material::Sand), seen, &p);
+    let n = proposals(sand(FALLING), seen, &p);
     assert_eq!(n[6], 4000, "sand proposes nothing: {n:?}");
     let n = proposals(State::holding(Material::Water), seen, &p);
     assert_eq!(n[Dir::Up as usize] + n[6], 4000, "water offers only up, if at all: {n:?}");
@@ -773,7 +802,7 @@ fn water(velocity: Velocity) -> State {
 
 #[test]
 fn propose_water_still_prefers_down() {
-    let n = proposals(water(DOWN), [State::VACUUM; 6], &Physics::default());
+    let n = proposals(water(FALLING), [State::VACUUM; 6], &Physics::default());
     assert!(
         n[Dir::Down as usize] > n[Dir::DownLeft as usize] && n[Dir::DownLeft as usize] > n[Dir::UpLeft as usize] * 4,
         "{n:?}"

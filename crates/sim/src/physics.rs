@@ -13,13 +13,16 @@
 //!   incompatible with it? Only the physically impossible: nothing, or a static particle, offers,
 //!   and nothing offers into a static particle (`offers_to`). Which does it most prefer? Weights
 //!   follow how well a move lines up with the velocity, halving with the turn from it as many times
-//!   as the particle's mass and `inertia` say (a heavy particle all but never offers backward), times
-//!   its mass, and how amenable it is to what the neighbor holds (`weight`).
+//!   as the particle's mass and its velocity's magnitude say (a heavy, fast particle all but never
+//!   offers backward), times its mass, and how amenable it is to what the neighbor holds (`weight`).
+//! - **Velocity** is a vector: a direction and a magnitude. Impulses add to it, and its magnitude
+//!   approaches the `ceiling` asymptotically, so a particle intending east hard holds that through
+//!   one impulse south and turns south through many (`impelled`).
 //! - **Air and vacuum**: when a cell holding air shares a neighborhood with a cell holding vacuum,
 //!   the air offers into the vacuum (`air_meets_vacuum`). On acceptance it spawns itself a new air
 //!   (`contract`).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
-//!   mass, turning it toward down (`moved`).
+//!   mass (`moved`).
 
 use crate::{Dir, Material, Velocity};
 
@@ -43,10 +46,8 @@ pub struct Properties {
 pub struct Physics {
     /// Gravity's impulse per unit of mass, in velocity units (`Velocity::SCALE` is one cell per move).
     pub gravity: u32,
-    /// How firmly a particle holds to its velocity, per unit of mass: how many times its weight for
-    /// a move halves for each unit the move turns from the velocity (1 - cosine: 0 straight ahead,
-    /// 1 at right angles, 2 straight back), in 1/16ths.
-    pub inertia: u32,
+    /// The magnitude a velocity approaches, asymptotically, as impulses add to it.
+    pub ceiling: u32,
     /// Each material's properties, indexed by its encoded value (`Material as usize`).
     pub materials: [Properties; 6],
 }
@@ -58,11 +59,11 @@ impl Default for Physics {
         // Mass: air very low, water low, sand mid, slate high, bedrock very high, vacuum none.
         set(Material::Vacuum, 0, 16, 0);
         set(Material::Air, 1, 16, 64);
-        set(Material::Water, 2, 8, 64);
+        set(Material::Water, 2, 8, 128);
         set(Material::Sand, 4, 1, 2);
         set(Material::Slate, 8, 0, 0);
         set(Material::Bedrock, 16, 0, 0);
-        Physics { gravity: 64, inertia: 48, materials }
+        Physics { gravity: 64, ceiling: 1024, materials }
     }
 }
 
@@ -73,6 +74,8 @@ const MASS_CAP: u32 = 16;
 const WEIGHT_TOP: u32 = 1 << 16;
 /// How many halvings of the weight count at most: past it, a move weighs nothing.
 const HALVINGS_CAP: u32 = 16;
+/// The largest the ceiling counts for.
+const CEILING_CAP: u32 = 1 << 13;
 /// The largest a deflection counts for.
 const DEFLECT_CAP: u32 = 1 << 10;
 
@@ -125,23 +128,24 @@ impl Physics {
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding
     /// `target`: its preference for the move, times its mass, times how amenable it is to what the
-    /// target holds. The preference halves `inertia * mass` times (in 1/16ths) per unit of turn
-    /// from the velocity, so straight ahead weighs most, and the heavier the particle the more
-    /// firmly it holds to its velocity.
+    /// target holds. The preference halves `mass * magnitude / SCALE` times per unit of turn from
+    /// the velocity, so straight ahead weighs most, and the heavier and faster the particle the
+    /// more firmly it holds to its velocity.
     pub fn weight(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> u32 {
         self.into(target) * self.mass(m) * self.preference(m, velocity, d)
     }
 
     /// How much a particle of `m` with `velocity` prefers moving toward `d`: `WEIGHT_TOP` straight
-    /// ahead, halving with the turn from the velocity, scaled by mass.
+    /// ahead, halving with the turn from the velocity, scaled by mass and magnitude.
     pub fn preference(&self, m: Material, velocity: Velocity, d: Dir) -> u32 {
         let (dx, dy) = d.step();
         let (vx, vy) = (velocity.x as i32, velocity.y as i32);
+        let magnitude = isqrt((vx * vx + vy * vy) as u32);
         let norm = isqrt(((vx * vx + vy * vy) * (dx * dx + dy * dy)) as u32) as i32;
         // The turn, 1 - cosine, in 1/1024ths: 0 straight ahead, 2048 straight back.
         let turn = if norm == 0 { 1024 } else { (1024 - velocity.along(d) * 1024 / norm).clamp(0, 2048) as u32 };
         // Halvings, in 1/1024ths of one.
-        let halvings = (self.inertia.min(1 << 8) * self.mass(m) * turn) >> 4;
+        let halvings = (self.mass(m) * magnitude.min(CEILING_CAP) * turn) >> 8;
         let whole = halvings >> 10;
         if whole >= HALVINGS_CAP {
             return 0;
@@ -151,11 +155,26 @@ impl Physics {
         w - ((w * (halvings & 1023)) >> 11)
     }
 
-    /// Gravity: the velocity of a particle of `m` that just moved, with gravity's impulse added,
-    /// then brought back to the steady scale.
+    /// Gravity: the velocity of a particle of `m` that just moved, with gravity's impulse added.
     pub fn moved(&self, m: Material, v: Velocity) -> Velocity {
         let impulse = (self.gravity.min(1 << 12) * self.mass(m)) as i32;
-        Velocity::steady(v.x as i32, v.y as i32 + impulse)
+        self.impelled(v, 0, impulse)
+    }
+
+    /// The velocity `v` with the impulse `(ix, iy)` added. Where the impulse lengthens it, the gain
+    /// in magnitude is eased by how far it already is toward the ceiling, so magnitude approaches
+    /// the ceiling and never passes it; direction turns in full.
+    pub fn impelled(&self, v: Velocity, ix: i32, iy: i32) -> Velocity {
+        let c = self.ceiling.clamp(1, CEILING_CAP) as i32;
+        let cap = CEILING_CAP as i32;
+        let (ux, uy) = (v.x as i32 + ix.clamp(-cap, cap), v.y as i32 + iy.clamp(-cap, cap));
+        let before = (isqrt((v.x as i32 * v.x as i32 + v.y as i32 * v.y as i32) as u32) as i32).min(c);
+        let after = isqrt((ux * ux + uy * uy) as u32) as i32;
+        if after == 0 {
+            return Velocity::DOWN;
+        }
+        let eased = if after > before { before + (after - before) * (c - before) / c } else { after };
+        Velocity { x: (ux * eased / after) as i16, y: (uy * eased / after) as i16 }
     }
 }
 

@@ -63,8 +63,8 @@ impl Material {
 /// A particle's velocity: its intent to move, a direction finer than the six sides of a hexagon,
 /// `y` growing downward.
 ///
-/// For now velocity is basically a direction: it keeps a steady scale (`SCALE`, one cell per move,
-/// measured as the larger of `|x|` and `|y|`) rather than a magnitude of its own.
+/// A vector: a direction and a magnitude (`SCALE` is one cell per move). Impulses add to it, and its
+/// magnitude approaches a ceiling asymptotically (`Physics::impelled`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Velocity {
     pub x: i16,
@@ -77,15 +77,6 @@ impl Velocity {
     pub const ZERO: Velocity = Velocity { x: 0, y: 0 };
     /// What a new particle intends: to move down. Everything always intends to move.
     pub const DOWN: Velocity = Velocity { x: 0, y: Velocity::SCALE as i16 };
-
-    /// The direction of `(x, y)` at the steady scale; down when it has none.
-    pub fn steady(x: i32, y: i32) -> Velocity {
-        let m = x.abs().max(y.abs());
-        if m == 0 {
-            return Velocity::DOWN;
-        }
-        Velocity { x: (x * Velocity::SCALE / m) as i16, y: (y * Velocity::SCALE / m) as i16 }
-    }
 
     /// How far this points toward `d`: the dot product with `d`'s step (see `Dir::step`).
     pub fn along(self, d: crate::Dir) -> i32 {

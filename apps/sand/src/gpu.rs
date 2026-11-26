@@ -155,10 +155,10 @@ impl Lattice {
     ) {
         let stamps = &stamps[stamps.len().saturating_sub(MAX_STAMPS)..];
         let p = physics;
-        // The lattice's size, the stamp count, gravity and inertia (padded), then each material's
+        // The lattice's size, the stamp count, gravity and the velocity ceiling (padded), then each material's
         // properties (mass, into, deflect, padding), in encoded order.
         let mut params =
-            vec![self.width as u32, self.height as u32, stamps.len() as u32, p.gravity, p.inertia, 0, 0, 0];
+            vec![self.width as u32, self.height as u32, stamps.len() as u32, p.gravity, p.ceiling, 0, 0, 0];
         for m in &p.materials {
             params.extend([m.mass, m.into, m.deflect, 0]);
         }
