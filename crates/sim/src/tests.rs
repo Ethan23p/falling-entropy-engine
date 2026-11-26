@@ -268,8 +268,8 @@ fn encoding_state_round_trips() {
         for velocity in velocities {
             for offer in [None, Some(Dir::Up), Some(Dir::UpLeft)] {
                 for accept in [None, Some(Dir::Down), Some(Dir::UpRight)] {
-                    for reject in [0, 1, 0b101010, 63] {
-                        let s = State { material, velocity, offer, accept, reject };
+                    for (reject, waits) in [(0, false), (1, true), (0b101010, false), (63, true)] {
+                        let s = State { material, velocity, offer, accept, reject, waits };
                         assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
                         assert!(s.encode() < 1 << 19, "19 bits");
                     }
@@ -326,11 +326,10 @@ fn around(with: &[(Dir, State)]) -> [State; 6] {
     out
 }
 
-/// How often, over many phases at which it may offer, a cell's update proposes toward each
-/// direction (and nowhere, last).
+/// How often, over many phases, a cell's update proposes toward each direction (and nowhere, last).
 fn proposals(me: State, seen: [State; 6], physics: &Physics) -> [u32; 7] {
     let mut out = [0; 7];
-    for phase in (0..).filter(|&p| crate::update::offers_now(5, 5, p)).take(4000) {
+    for phase in 0..4000 {
         let s = next(me, State::AIR, seen, 5, 5, phase, physics);
         out[s.offer.map_or(6, |d| d as usize)] += 1;
     }
@@ -485,13 +484,26 @@ fn evaluate_air_gives_way_to_sand_but_not_to_air() {
 }
 
 #[test]
-fn evaluate_committed_air_rejects_sand() {
-    // A contract ties up the resources it deals in: air with its offer out is reserved, so it
-    // rejects the sand, explicitly.
+fn evaluate_air_with_its_offer_out_still_accepts_sand() {
+    // Air is insubstantial: with its own offer out, it still accepts exactly one offer of sand.
     let me = State { offer: Some(Dir::DownLeft), ..State::AIR };
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(me, State::AIR, seen, 2, 2, 1, &Physics::default());
-    assert_eq!((s.material, s.accept, s.rejected(Dir::Up)), (Material::Air, None, true));
+    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
+}
+
+#[test]
+fn resolve_an_offer_of_air_that_ceased_to_exist_has_no_effect() {
+    // The contract's conditions absorb the change: the air I offered is gone, sand is here now, and
+    // whatever the verdict, the air's terms leave the sand as it is.
+    let kept = State { offer: Some(Dir::Down), ..State::AIR };
+    let v = Velocity { x: 100, y: 500 };
+    let me = State { accept: Some(Dir::Up), ..sand(v) };
+    for (accept, reject) in [(Some(Dir::Up), 0), (None, 1 << Dir::Up as u8)] {
+        let seen = around(&[(Dir::Down, State { accept, reject, ..State::AIR })]);
+        let s = next(me, kept, seen, 2, 2, 0, &Physics::default());
+        assert_eq!((s.material, s.velocity), (Material::Sand, v));
+    }
 }
 
 #[test]
@@ -521,7 +533,7 @@ fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
     for holding in Material::ALL {
         for offered in [Material::Air, Material::Water, Material::Sand] {
             let room = holding == Material::Vacuum || (holding == Material::Air && offered != Material::Air);
-            assert_eq!(p.entertains(offered, holding, false), room, "{offered:?} into {holding:?}");
+            assert_eq!(p.entertains(offered, holding), room, "{offered:?} into {holding:?}");
         }
     }
 }
@@ -588,7 +600,7 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     assert_eq!(s.material, Material::Sand);
     assert_eq!(s.velocity, deflect(&p, Material::Sand, v, Dir::Down, 0));
     assert!(s.velocity.x > v.x, "{:?}", s.velocity);
-    assert_eq!(s.offer.is_some(), crate::update::offers_now(2, 2, 0));
+    assert!(s.offer.is_some());
 }
 
 /// A particle of `m` with velocity `v`, after the deflection effect of a rejection by the cell

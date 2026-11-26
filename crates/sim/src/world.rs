@@ -39,7 +39,16 @@ impl World {
         // A fresh lattice is empty space: vacuum.
         let v = State::VACUUM.velocity.encode();
         let cell = [word(State::VACUUM, 0), word(State::VACUUM, PHASE_MASK), v, v];
-        World { width, height, cells: cell.repeat((width * height) as usize), physics: Physics::default() }
+        let mut cells = cell.repeat((width * height) as usize);
+        // Initialization: whether a cell offers at once or waits one phase is a coin flip.
+        for y in 0..height {
+            for x in 0..width {
+                if crate::hash(x, y, 0, crate::update::SALT_WAIT) & 1 == 1 {
+                    cells[WORDS * (y * width + x) as usize] = word(State { waits: true, ..State::VACUUM }, 0);
+                }
+            }
+        }
+        World { width, height, cells, physics: Physics::default() }
     }
 
     /// Rebuilds a world from raw cell words, e.g. a GPU readback.
@@ -137,7 +146,9 @@ impl World {
         let i = self.index(x, y);
         let parity = self.current(i);
         let slot = WORDS * i + parity;
-        self.cells[slot] = word(s, self.cells[slot] >> STATE_BITS);
+        // Painting keeps the cell's initialization (whether it waits).
+        let waits = State::decode(self.cells[slot] & STATE_MASK, 0).waits;
+        self.cells[slot] = word(State { waits, ..s }, self.cells[slot] >> STATE_BITS);
         self.cells[WORDS * i + 2 + parity] = s.velocity.encode();
     }
 

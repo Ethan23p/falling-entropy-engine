@@ -8,7 +8,8 @@
 // doesn't overwrite until it reaches p + 2, so cells run in any order and in place.
 // A state (`State::encode`): what the cell holds in bits 0-2 (0 air, 1 sand, 2 bedrock,
 // 3 vacuum: nothing, 4 slate, 5 water), the offer in bits 3-5 and the acceptance in bits 6-8
-// (1 + a direction, or 0 for none), the rejections in bits 9-14 (one per direction). A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
+// (1 + a direction, or 0 for none), the rejections in bits 9-14 (one per direction), and in bit 15 whether it waits (set
+// only on initialization). A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
@@ -59,7 +60,6 @@ const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
-const SALT_OFFSET: u32 = 4u;
 const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const WEIGHT_TOP: u32 = 65536u;
@@ -126,6 +126,7 @@ struct State {
     accept: u32,
     // One bit per direction.
     reject: u32,
+    waits: u32,
 }
 
 // `Material::decode`: the codes past water read as vacuum.
@@ -144,11 +145,11 @@ fn decode(bits: u32, v: u32) -> State {
     if accept == 7u {
         accept = 0u;
     }
-    return State(material, velocity, offer, accept, (bits >> 9u) & 63u);
+    return State(material, velocity, offer, accept, (bits >> 9u) & 63u, (bits >> 15u) & 1u);
 }
 
 fn encode(s: State) -> u32 {
-    return s.material | (s.offer << 3u) | (s.accept << 6u) | ((s.reject & 63u) << 9u);
+    return s.material | (s.offer << 3u) | (s.accept << 6u) | ((s.reject & 63u) << 9u) | ((s.waits & 1u) << 15u);
 }
 
 fn encode_velocity(v: vec2<i32>) -> u32 {
@@ -161,7 +162,7 @@ fn holding(m: u32) -> State {
     if moves(m) {
         v = vec2(0, SCALE);
     }
-    return State(m, v, 0u, 0u, 0u);
+    return State(m, v, 0u, 0u, 0u, 0u);
 }
 
 // Particle (`particle`): `Material::is_particle`, `is_substantial`, `is_static`, `moves`.
@@ -224,8 +225,8 @@ fn air_meets_vacuum(m: u32, seen: ptr<function, array<State, 6>>) -> bool {
 // `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a substantial
 // particle rejects every offer of one; holding nothing, it can take any; holding air, a substantial
 // one, and the air ceases to exist.
-fn entertains(offered: u32, dest: u32, committed: bool) -> bool {
-    let room = !is_particle(dest) || (!is_substantial(dest) && is_substantial(offered) && !committed);
+fn entertains(offered: u32, dest: u32) -> bool {
+    let room = !is_particle(dest) || (!is_substantial(dest) && is_substantial(offered));
     return moves(offered) && room;
 }
 
@@ -370,12 +371,6 @@ fn select_from(weights: ptr<function, array<u32, 6>>, bits: u32) -> u32 {
     return 0u;
 }
 
-// `update::offers_now`: only the very first phase is in question: on initialization, whether a cell
-// offers at once or waits one phase is a coin flip.
-fn offers_now(x: i32, y: i32, phase: u32) -> bool {
-    return phase != 0u || (hash(x, y, 0u, SALT_OFFSET) & 1u) == 0u;
-}
-
 // One update: read, resolve, evaluate, evolve, publish, propose (`update::next`).
 fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y: i32, phase: u32) -> State {
     var live = me;
@@ -388,15 +383,19 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // its origin. With none yet, it stands: publish it again.
     if kept.offer != 0u {
         let d = kept.offer - 1u;
-        if accepted(d, (*seen)[d]) {
+        // The conditions absorb a change in context: offered air that ceased to exist meanwhile
+        // leaves the terms without effect on me.
+        let here = live.material == kept.material;
+        if accepted(d, (*seen)[d]) && here {
             if is_substantial(kept.material) {
                 release(&live);
             } else {
                 spawn(&live);
             }
-        } else if rejected(d, (*seen)[d]) {
+        } else if accepted(d, (*seen)[d]) {
+        } else if rejected(d, (*seen)[d]) && here {
             deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
-        } else {
+        } else if !rejected(d, (*seen)[d]) {
             live.offer = kept.offer;
             standing = true;
         }
@@ -414,7 +413,7 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
             let origin = (*seen)[d];
             if origin.offer == opposite(d) + 1u {
                 offered |= 1u << d;
-                if entertains(origin.material, live.material, committed) {
+                if entertains(origin.material, live.material) {
                     weights[d] = max(weight(origin.material, origin.velocity, opposite(d), live.material), 1u);
                 }
             }
@@ -433,7 +432,8 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // Publish, then propose, in one write (see `update::next`).
     // Propose: from the six neighbors, exclude those it wouldn't offer to, select among the rest,
     // weighted.
-    if !committed && offers_now(x, y, phase) {
+    live.waits = 0u;
+    if !committed && me.waits == 0u {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         let only_vacuum = air_meets_vacuum(live.material, seen);
         for (var d = 0u; d < 6u; d++) {
@@ -533,7 +533,9 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     if painted {
-        let s = holding(here);
+        var s = holding(here);
+        // Painting keeps the cell's initialization (whether it waits).
+        s.waits = (word >> 15u) & 1u;
         atomicStore(&cells[4 * i + parity], encode(s) | (word & ~STATE_MASK));
         atomicStore(&cells[4 * i + 2 + parity], encode_velocity(s.velocity));
     }

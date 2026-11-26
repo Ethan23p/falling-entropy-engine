@@ -12,7 +12,7 @@ use crate::{Dir, Material, Physics, State, hash};
 pub const SALT_EVALUATE: u32 = 1;
 pub const SALT_PROPOSE: u32 = 2;
 pub const SALT_DEFLECT: u32 = 3;
-pub const SALT_OFFSET: u32 = 4;
+pub const SALT_WAIT: u32 = 4;
 
 /// One cell's update: its next published state from its own state, the state it kept back from
 /// the phase before, and its neighbors' published state, all at the same phase (outside the
@@ -23,25 +23,21 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     // contracts cleared until the stages below write them again.
     let mut live = State { offer: None, accept: None, reject: 0, ..me };
     // An offer of mine being evaluated now, or one with no verdict yet (it stands), ties up my
-    // particle: I propose nothing new, and evaluate entertains no offer into it.
+    // particle: I propose nothing new. What I can take in evaluate is the capacity limit's to say.
     let standing = resolve(&mut live, kept, &seen, x, y, phase, physics);
     let committed = Offer::of(me).is_some() || standing;
 
-    evaluate(&mut live, committed, &seen, x, y, phase, physics);
+    evaluate(&mut live, &seen, x, y, phase, physics);
     evolve(&mut live);
     // Publish, then propose. They share one write: the word a cell writes at the end of its update
     // holds both its published state and the contracts it just proposed, and neighbors read them
     // together at the next phase, as if published first.
-    if !committed && offers_now(x, y, phase) {
+    // On initialization, a cell that waits (a coin flip, `World::new`) lets its first phase pass.
+    live.waits = false;
+    if !committed && !me.waits {
         propose(&mut live, &seen, x, y, phase, physics);
     }
     live
-}
-
-/// Whether a cell may offer at this phase. Only the very first is in question: on initialization,
-/// whether a cell offers at once or waits one phase is a coin flip (a bit of its position's hash).
-pub fn offers_now(x: i32, y: i32, phase: u32) -> bool {
-    phase != 0 || hash(x, y, 0, SALT_OFFSET) & 1 == 0
 }
 
 /// Resolve: the offer I published last phase (now in my kept-back state) has its verdict, if any,
@@ -54,8 +50,12 @@ fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, pha
         live.offer = kept.offer;
         return true;
     };
-    let (mine, _) = offer.terms(verdict, kept, hash(x, y, phase, SALT_DEFLECT));
-    mine.apply(live, physics);
+    // The contract's conditions absorb a change in context: air I offered may have ceased to exist
+    // (a more substantial particle transferred in meanwhile), and then its terms have no effect on me.
+    if live.material == kept.material {
+        let (mine, _) = offer.terms(verdict, kept, hash(x, y, phase, SALT_DEFLECT));
+        mine.apply(live, physics);
+    }
     false
 }
 
@@ -67,14 +67,14 @@ fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, pha
 /// accepted one is named in `accept`, every other in `reject`. A rejected offer's terms have no
 /// effect on me.
 #[allow(clippy::too_many_arguments)]
-fn evaluate(live: &mut State, committed: bool, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
+fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
     let mut offered = 0u8;
     for d in Dir::ALL {
         let origin = seen[d as usize];
         if origin.offer == Some(d.opposite()) {
             offered |= 1 << d as u8;
-            if physics.entertains(origin.material, live.material, committed) {
+            if physics.entertains(origin.material, live.material) {
                 weights[d as usize] =
                     physics.weight(origin.material, origin.velocity, d.opposite(), live.material).max(1);
             }

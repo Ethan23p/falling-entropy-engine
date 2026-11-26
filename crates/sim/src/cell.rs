@@ -19,6 +19,9 @@ pub struct State {
     pub offer: Option<Dir>,
     pub accept: Option<Dir>,
     pub reject: u8,
+    /// Set only on initialization, by a coin flip: the cell lets its first phase pass before it
+    /// offers, so cells don't all offer in step.
+    pub waits: bool,
 }
 
 impl State {
@@ -30,14 +33,18 @@ impl State {
     /// A fresh particle that moves intends to move down.
     pub const fn holding(material: Material) -> State {
         let velocity = if material.moves() { Velocity::DOWN } else { Velocity::ZERO };
-        State { material, velocity, offer: None, accept: None, reject: 0 }
+        State { material, velocity, offer: None, accept: None, reject: 0, waits: false }
     }
 
     /// Bits 0-2 the material, 3-5 the offer and 6-8 the acceptance (1 + a direction, or 0 for
-    /// none), 9-14 the rejections. The velocity has a word of its own (`Velocity::encode`).
+    /// none), 9-14 the rejections, 15 whether it waits. The velocity has a word of its own (`Velocity::encode`).
     pub fn encode(self) -> u32 {
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
-        self.material as u32 | dir(self.offer) << 3 | dir(self.accept) << 6 | ((self.reject & 63) as u32) << 9
+        self.material as u32
+            | dir(self.offer) << 3
+            | dir(self.accept) << 6
+            | ((self.reject & 63) as u32) << 9
+            | (self.waits as u32) << 15
     }
 
     /// Whether this cell rejected the offer from the neighbor toward `d`.
@@ -56,6 +63,7 @@ impl State {
             offer: dir(bits >> 3),
             accept: dir(bits >> 6),
             reject: (bits >> 9 & 63) as u8,
+            waits: bits >> 15 & 1 == 1,
         }
     }
 
