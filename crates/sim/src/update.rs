@@ -95,13 +95,14 @@ fn resolve(
 /// particles and better-aligned moves first); so are requests for my particle, which I can give
 /// only while it isn't tied up, weighted by how well my particle's move toward the requester lines
 /// up. The selected contract is accepted, and I apply its terms' effect on me: for an offer, I
-/// receive the particle; for a request, I give mine. While contracts remain I select again, but a
-/// cell holds one particle at most: once one is accepted, the rest are excluded. Every contract I
-/// evaluate gets a verdict: the accepted one is named in `accept`, every other in `reject`.
+/// receive the particle; for a request, I give mine. Either ties up what it deals in: a received
+/// particle is in transport, and fills my capacity; a given one is committed to its requester. While
+/// contracts remain I select again, from those my resources still entertain. Every contract I
+/// evaluate gets a verdict: an accepted one is named in `accept`, every other in `reject`.
 ///
 /// A matched pair is accepted automatically: an offer from the neighbor I'm requesting from, which
-/// I accept, and a request from the neighbor I'm offering to, which gets no verdict from me (its
-/// author accepts my offer).
+/// I accept first, and a request from the neighbor I'm offering to, which gets no verdict from me
+/// (its author accepts my offer).
 #[allow(clippy::too_many_arguments)]
 fn evaluate(
     live: &mut State,
@@ -113,37 +114,52 @@ fn evaluate(
     phase: u32,
     physics: &Physics,
 ) {
-    let matched = me.request.filter(|&d| {
-        let origin = seen[d as usize];
-        origin.offer == Some(d.opposite()) && physics.entertains(origin.material, live.material, false)
-    });
-    let mut weights = [0; 6];
-    let mut asked = 0u8;
-    for d in Dir::ALL {
+    let offers = |d: Dir| seen[d as usize].offer == Some(d.opposite());
+    let asked = Dir::ALL.iter().fold(0u8, |bits, &d| {
         let other = seen[d as usize];
-        if other.offer == Some(d.opposite()) {
-            asked |= 1 << d as u8;
-            if matched.is_none() && physics.entertains(other.material, live.material, committed) {
-                weights[d as usize] =
-                    physics.weight(other.material, other.velocity, d.opposite(), live.material).max(1);
+        let requests = other.request == Some(d.opposite()) && me.offer != Some(d);
+        bits | ((offers(d) || requests) as u8) << d as u8
+    });
+    let mut tied = committed;
+    let mut taken = 0u8;
+    let mut next =
+        me.request.filter(|&d| offers(d) && physics.entertains(seen[d as usize].material, live.material, false));
+    for round in 0..6 {
+        let d = match next.take() {
+            Some(d) => d,
+            None => {
+                let mut weights = [0; 6];
+                for d in Dir::ALL {
+                    let other = seen[d as usize];
+                    if (asked & !taken) >> d as u8 & 1 == 0 {
+                        continue;
+                    }
+                    if offers(d) {
+                        if physics.entertains(other.material, live.material, tied) {
+                            weights[d as usize] =
+                                physics.weight(other.material, other.velocity, d.opposite(), live.material).max(1);
+                        }
+                    } else if !tied && physics.entertains(live.material, other.material, false) {
+                        weights[d as usize] = physics.weight(live.material, live.velocity, d, other.material).max(1);
+                    }
+                }
+                match select(&weights, hash(x, y, phase, SALT_EVALUATE | round << 8)) {
+                    Some(i) => Dir::ALL[i],
+                    None => break,
+                }
             }
-        } else if other.request == Some(d.opposite()) && me.offer != Some(d) {
-            asked |= 1 << d as u8;
-            if matched.is_none() && !committed && physics.entertains(live.material, other.material, false) {
-                weights[d as usize] = physics.weight(live.material, live.velocity, d, other.material).max(1);
-            }
-        }
+        };
+        taken |= 1 << d as u8;
+        let other = seen[d as usize];
+        let mine = if offers(d) {
+            Offer { toward: d.opposite() }.terms(Verdict::Accepted, other, 0).1
+        } else {
+            Request { from: d.opposite() }.terms(Verdict::Accepted, *live).0
+        };
+        mine.apply(live, physics);
+        tied = true;
     }
-    let accepted = matched.map(|d| d as usize).or_else(|| select(&weights, hash(x, y, phase, SALT_EVALUATE)));
-    live.reject = asked & !accepted.map_or(0, |i| 1 << i);
-    let Some(i) = accepted else { return };
-    let (d, other) = (Dir::ALL[i], seen[i]);
-    let mine = if other.offer == Some(d.opposite()) {
-        Offer { toward: d.opposite() }.terms(Verdict::Accepted, other, 0).1
-    } else {
-        Request { from: d.opposite() }.terms(Verdict::Accepted, *live).0
-    };
-    mine.apply(live, physics);
+    live.reject = asked & !taken;
 }
 
 /// Evolve: natural contracts, within the cell. None yet.

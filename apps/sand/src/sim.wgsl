@@ -459,46 +459,58 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
 
     // Evaluate: the contracts that target me (offers into me, requests for my particle), excluded
     // unless the physics distribution entertains them, the rest weighted; the one selected is
-    // accepted. Holding one particle at most, I then exclude the rest. Every contract evaluated gets
-    // a verdict: accepted, or rejected. A matched pair is accepted automatically.
+    // accepted, tying up what it deals in. While contracts remain I select again, from those my
+    // resources still entertain. Every contract evaluated gets a verdict: accepted, or rejected. A
+    // matched pair is accepted automatically, first.
     {
-        var matched = 0u;
+        var asked = 0u;
+        for (var d = 0u; d < 6u; d++) {
+            let other = (*seen)[d];
+            if other.offer == opposite(d) + 1u || (other.request == opposite(d) + 1u && me.offer != d + 1u) {
+                asked |= 1u << d;
+            }
+        }
+        var tied = committed;
+        var taken = 0u;
+        var next_pick = 0u;
         if me.request != 0u {
             let d = me.request - 1u;
             let origin = (*seen)[d];
             if origin.offer == opposite(d) + 1u && entertains(origin.material, live.material, false) {
-                matched = me.request;
+                next_pick = me.request;
             }
         }
-        var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
-        var asked = 0u;
-        for (var d = 0u; d < 6u; d++) {
-            let other = (*seen)[d];
-            if other.offer == opposite(d) + 1u {
-                asked |= 1u << d;
-                if matched == 0u && entertains(other.material, live.material, committed) {
-                    weights[d] = max(weight(other.material, other.velocity, opposite(d), live.material), 1u);
+        for (var round = 0u; round < 6u; round++) {
+            var i = next_pick;
+            next_pick = 0u;
+            if i == 0u {
+                var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+                for (var d = 0u; d < 6u; d++) {
+                    let other = (*seen)[d];
+                    if (((asked & ~taken) >> d) & 1u) == 0u {
+                        continue;
+                    }
+                    if other.offer == opposite(d) + 1u {
+                        if entertains(other.material, live.material, tied) {
+                            weights[d] = max(weight(other.material, other.velocity, opposite(d), live.material), 1u);
+                        }
+                    } else if !tied && entertains(live.material, other.material, false) {
+                        weights[d] = max(weight(live.material, live.velocity, d, other.material), 1u);
+                    }
                 }
-            } else if other.request == opposite(d) + 1u && me.offer != d + 1u {
-                asked |= 1u << d;
-                if matched == 0u && !committed && entertains(live.material, other.material, false) {
-                    weights[d] = max(weight(live.material, live.velocity, d, other.material), 1u);
+                i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE | (round << 8u)));
+                if i == 0u {
+                    break;
                 }
             }
-        }
-        var i = matched;
-        if i == 0u {
-            i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE));
-        }
-        var taken = 0u;
-        if i != 0u {
             let d = i - 1u;
-            taken = 1u << d;
+            taken |= 1u << d;
             if (*seen)[d].offer == opposite(d) + 1u {
                 receive(&live, d, (*seen)[d]);
             } else {
                 give(&live, d);
             }
+            tied = true;
         }
         live.reject = asked & ~taken;
     }
