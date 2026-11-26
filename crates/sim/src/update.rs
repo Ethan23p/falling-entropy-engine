@@ -12,6 +12,7 @@ use crate::{Dir, Material, Physics, State, hash};
 pub const SALT_EVALUATE: u32 = 1;
 pub const SALT_PROPOSE: u32 = 2;
 pub const SALT_DEFLECT: u32 = 3;
+pub const SALT_OFFSET: u32 = 4;
 
 /// One cell's update: its next published state from its own state, the state it kept back from
 /// the phase before, and its neighbors' published state, all at the same phase (outside the
@@ -31,10 +32,16 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     // Publish, then propose. They share one write: the word a cell writes at the end of its update
     // holds both its published state and the contracts it just proposed, and neighbors read them
     // together at the next phase, as if published first.
-    if !committed {
+    if !committed && offers_now(x, y, phase) {
         propose(&mut live, &seen, x, y, phase, physics);
     }
     live
+}
+
+/// Whether a cell may offer at this phase: every other phase, offset by a bit of its position's
+/// hash, so neighbors don't all offer at once.
+pub fn offers_now(x: i32, y: i32, phase: u32) -> bool {
+    hash(x, y, phase, SALT_OFFSET) & 1 == 0
 }
 
 /// Resolve: the offer I published last phase (now in my kept-back state) has its verdict, if any,

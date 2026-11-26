@@ -326,10 +326,11 @@ fn around(with: &[(Dir, State)]) -> [State; 6] {
     out
 }
 
-/// How often, over many phases, a cell's update proposes toward each direction (and nowhere, last).
+/// How often, over many phases at which it may offer, a cell's update proposes toward each
+/// direction (and nowhere, last).
 fn proposals(me: State, seen: [State; 6], physics: &Physics) -> [u32; 7] {
     let mut out = [0; 7];
-    for phase in 0..4000 {
+    for phase in (0..).filter(|&p| crate::update::offers_now(5, 5, p)).take(4000) {
         let s = next(me, State::AIR, seen, 5, 5, phase, physics);
         out[s.offer.map_or(6, |d| d as usize)] += 1;
     }
@@ -587,7 +588,7 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     assert_eq!(s.material, Material::Sand);
     assert_eq!(s.velocity, deflect(&p, Material::Sand, v, Dir::Down, 0));
     assert!(s.velocity.x > v.x, "{:?}", s.velocity);
-    assert!(s.offer.is_some());
+    assert_eq!(s.offer.is_some(), crate::update::offers_now(2, 2, 0));
 }
 
 /// A particle of `m` with velocity `v`, after the deflection effect of a rejection by the cell
@@ -659,7 +660,10 @@ fn contract_offer_evaluate_resolve_takes_three_phases() {
     for (x, y) in [(1, 0), (3, 0), (1, 1), (3, 1)] {
         w.paint(x, y, Material::Bedrock);
     }
-    w.step(); // propose
+    // Its first phase to offer: offers are offset, cell by cell.
+    while w.cell(2, 0).offer.is_none() {
+        w.step(); // propose
+    }
     assert_eq!(w.cell(2, 0).offer, Some(Dir::Down), "{}", w.ascii());
     w.step(); // evaluate
     assert_eq!((w.cell(2, 1).material, w.cell(2, 1).accept), (Material::Sand, Some(Dir::Up)));

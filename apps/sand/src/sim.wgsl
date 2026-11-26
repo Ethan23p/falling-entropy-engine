@@ -59,6 +59,7 @@ const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
+const SALT_OFFSET: u32 = 4u;
 const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const WEIGHT_TOP: u32 = 65536u;
@@ -369,6 +370,11 @@ fn select_from(weights: ptr<function, array<u32, 6>>, bits: u32) -> u32 {
     return 0u;
 }
 
+// `update::offers_now`: a cell may offer every other phase, offset by a bit of its position's hash.
+fn offers_now(x: i32, y: i32, phase: u32) -> bool {
+    return ((phase ^ hash(x, y, 0u, SALT_OFFSET)) & 1u) == 0u;
+}
+
 // One update: read, resolve, evaluate, evolve, publish, propose (`update::next`).
 fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y: i32, phase: u32) -> State {
     var live = me;
@@ -426,7 +432,7 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // Publish, then propose, in one write (see `update::next`).
     // Propose: from the six neighbors, exclude those it wouldn't offer to, select among the rest,
     // weighted.
-    if !committed {
+    if !committed && offers_now(x, y, phase) {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         let only_vacuum = air_meets_vacuum(live.material, seen);
         for (var d = 0u; d < 6u; d++) {
