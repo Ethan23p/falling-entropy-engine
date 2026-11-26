@@ -40,11 +40,11 @@ impl World {
         let v = State::VACUUM.velocity.encode();
         let cell = [word(State::VACUUM, 0), word(State::VACUUM, PHASE_MASK), v, v];
         let mut cells = cell.repeat((width * height) as usize);
-        // Initialization: every other row waits one phase before it offers, so neighbors don't all
-        // offer in step.
+        // Initialization: whether a cell offers at once or waits one phase is a coin flip, so
+        // neighbors don't all offer in step.
         for y in 0..height {
             for x in 0..width {
-                if y & 1 == 1 {
+                if crate::hash(x, y, 0, crate::update::SALT_WAIT) & 1 == 1 {
                     cells[WORDS * (y * width + x) as usize] = word(State { waits: true, ..State::VACUUM }, 0);
                 }
             }

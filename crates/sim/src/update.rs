@@ -12,6 +12,7 @@ use crate::{Dir, Material, Physics, State, hash};
 pub const SALT_EVALUATE: u32 = 1;
 pub const SALT_PROPOSE: u32 = 2;
 pub const SALT_DEFLECT: u32 = 3;
+pub const SALT_WAIT: u32 = 4;
 
 /// One cell's update: its next published state from its own state, the state it kept back from
 /// the phase before, and its neighbors' published state, all at the same phase (outside the
@@ -31,7 +32,7 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     // Publish, then propose. They share one write: the word a cell writes at the end of its update
     // holds both its published state and the contracts it just proposed, and neighbors read them
     // together at the next phase, as if published first.
-    // On initialization, a cell that waits (every other row, `World::new`) lets its first phase pass.
+    // On initialization, a cell that waits (a coin flip, `World::new`) lets its first phase pass.
     live.waits = false;
     if !committed && !me.waits {
         propose(&mut live, &seen, x, y, phase, physics);
