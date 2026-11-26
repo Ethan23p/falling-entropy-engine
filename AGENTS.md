@@ -20,7 +20,7 @@ Ethan designs; Claude engineers (code, tooling, verification).
 ## Workflow
 
 1. Read what the doc says about the mechanic; settle open questions.
-2. Write failing tests named after what they pin (`propose_*`, `evaluate_*`, `resolve_*`, `conservation_*`). Invariants (conservation on published state, order independence, one cell per phase) always stay; behavior tests are instruments, so report when an outcome moves.
+2. Write failing tests named after what they pin (`propose_*`, `evaluate_*`, `resolve_*`, `conservation_*`). Invariants (conservation on published state, order independence, one cell per phase) always stay; behavior tests are instruments, so report when an outcome moves. Old tests shouldn't pin behavior prematurely: behavior is judged subjectively, and a regression is apparent to the one reading the test results.
 3. Implement until they pass, then look at a strip.
 4. Make it playable on desktop and phone (Ethan plays on a phone). Commit.
 
