@@ -11,13 +11,57 @@ pub const MAX_STAMPS: usize = 256;
 /// The sim's uniforms: four words, then four per material (`Params` in sim.wgsl).
 const PARAMS_BYTES: u64 = 4 * (8 + 4 * 6);
 
-/// A brush stamp, in cell units: `y` already includes odd columns' half-cell shift.
+/// A brush stamp: a shape and the material it paints (`World::stamp`, `World::stamp_tetrahex`).
 #[derive(Clone, Copy, Debug)]
 pub struct Stamp {
-    pub x: f32,
-    pub y: f32,
-    pub radius: f32,
+    pub shape: Shape,
     pub material: sim::Material,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Shape {
+    /// A disc of cell centres, in cell units: `y` already includes odd columns' half-cell shift.
+    /// Scene scripts stamp these.
+    Disc { x: f32, y: f32, radius: f32 },
+    /// The player's brush.
+    Tetrahex(sim::Placed),
+}
+
+/// Bytes per stamp (`Stamp` in sim.wgsl).
+const STAMP_BYTES: usize = 64;
+/// The render shader's uniforms (`View` in render.wgsl).
+const VIEW_BYTES: u64 = 112;
+
+impl Stamp {
+    fn words(&self) -> [u32; STAMP_BYTES / 4] {
+        let mut w = [0u32; STAMP_BYTES / 4];
+        w[1] = self.material as u32;
+        match self.shape {
+            Shape::Disc { x, y, radius } => {
+                w[2] = radius.to_bits();
+                w[4] = x.to_bits();
+                w[5] = y.to_bits();
+            }
+            Shape::Tetrahex(t) => {
+                w[0] = 1;
+                w[3] = t.radius as u32;
+                for (k, (q, r)) in t.centres.iter().enumerate() {
+                    w[8 + 2 * k] = *q as u32;
+                    w[9 + 2 * k] = *r as u32;
+                }
+            }
+        }
+        w
+    }
+
+    /// Applies this stamp to the CPU reference, as the brush pass does on the GPU.
+    #[cfg(test)]
+    pub fn apply(&self, world: &mut sim::World) {
+        match self.shape {
+            Shape::Disc { x, y, radius } => world.stamp(x, y, radius, self.material),
+            Shape::Tetrahex(t) => world.stamp_tetrahex(&t, self.material),
+        }
+    }
 }
 
 /// Pipelines: made once per device and target format.
@@ -114,10 +158,10 @@ impl Lattice {
             })
         };
         let params = uniform("params", PARAMS_BYTES);
-        let view = uniform("view", 32);
+        let view = uniform("view", VIEW_BYTES);
         let stamps = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("stamps"),
-            size: (MAX_STAMPS * 16) as u64,
+            size: (MAX_STAMPS * STAMP_BYTES) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -173,8 +217,8 @@ impl Lattice {
         queue.write_buffer(&self.params, 0, &words(&params));
         let (gx, gy) = self.groups();
         if !stamps.is_empty() {
-            let data: Vec<f32> = stamps.iter().flat_map(|s| [s.x, s.y, s.radius, s.material as u32 as f32]).collect();
-            queue.write_buffer(&self.stamps, 0, &floats(&data));
+            let data: Vec<u32> = stamps.iter().flat_map(|s| s.words()).collect();
+            queue.write_buffer(&self.stamps, 0, &words(&data));
             let mut pass = encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("brush"), timestamp_writes: None });
             pass.set_pipeline(&pipelines.brush);
@@ -191,33 +235,67 @@ impl Lattice {
         }
     }
 
-    /// Draws the lattice into `target` with its top-left at `origin` and each cell `cell` pixels.
+    /// Draws the lattice into `target` as `look` says, inside `clip` (x, y, width, height, in
+    /// pixels, already within the target). `clear` clears the whole target first.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         queue: &wgpu::Queue,
         pipelines: &Pipelines,
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
-        origin: [f32; 2],
-        cell: [f32; 2],
+        look: &Look,
+        clip: [u32; 4],
+        clear: Option<wgpu::Color>,
     ) {
         let mut data = words(&[self.width as u32, self.height as u32]);
-        data.extend(floats(&[origin[0], origin[1], cell[0], cell[1], 0.0, 0.0]));
+        data.extend(floats(&[look.size, look.texel, look.origin[0], look.origin[1], look.edges]));
+        let (radius, material, centres) = match look.ghost {
+            Some((t, m)) => (t.radius, m as u32, t.centres),
+            None => (-1, 0, [(0, 0); 4]),
+        };
+        data.extend(words(&[radius as u32, material, 0, 0, 0]));
+        for (q, r) in centres {
+            data.extend(words(&[q as u32, r as u32, 0, 0]));
+        }
+        debug_assert_eq!(data.len() as u64, VIEW_BYTES);
         queue.write_buffer(&self.view, 0, &data);
+        let load = match clear {
+            Some(c) => wgpu::LoadOp::Clear(c),
+            None => wgpu::LoadOp::Load,
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lattice"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
             })],
             ..Default::default()
         });
+        if clip[2] == 0 || clip[3] == 0 {
+            return;
+        }
+        pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
         pass.set_pipeline(&pipelines.render);
         pass.set_bind_group(0, &self.render_group, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+/// How a lattice is drawn: its hexagons' size and placement, and the brush's ghost.
+#[derive(Clone, Copy, Debug)]
+pub struct Look {
+    /// A hexagon's size, centre to corner, in virtual pixels.
+    pub size: f32,
+    /// Screen pixels per virtual pixel.
+    pub texel: f32,
+    /// The lattice's top-left on screen, in pixels.
+    pub origin: [f32; 2],
+    /// How dark hex edges draw, 0 to 1.
+    pub edges: f32,
+    pub ghost: Option<(sim::Placed, sim::Material)>,
 }
 
 /// The cells read back without stalling a frame: copy in one frame, map in the next, read once
@@ -376,18 +454,27 @@ mod tests {
         }
 
         // The brush: a particle only into a cell holding nothing, erasing anything but bedrock, in order.
+        let disc = |x, y, radius, material| Stamp { shape: Shape::Disc { x, y, radius }, material };
+        let hex = |seed, radius, at, material| Stamp {
+            shape: Shape::Tetrahex(sim::Placed::random(seed, radius, at)),
+            material,
+        };
         let stamps = [
-            Stamp { x: 20.0, y: 40.0, radius: 6.5, material: Material::Sand },
-            Stamp { x: 30.0, y: 10.0, radius: 8.5, material: Material::Sand },
-            Stamp { x: 22.0, y: 40.0, radius: 3.5, material: Material::Vacuum },
-            Stamp { x: 10.0, y: 10.0, radius: 3.5, material: Material::Air },
-            Stamp { x: 40.0, y: 30.0, radius: 4.5, material: Material::Vacuum },
-            Stamp { x: 50.0, y: 8.0, radius: 6.5, material: Material::Sand },
-            Stamp { x: 12.0, y: 30.0, radius: 3.5, material: Material::Water },
-            Stamp { x: 45.0, y: 40.0, radius: 2.5, material: Material::Slate },
+            disc(20.0, 40.0, 6.5, Material::Sand),
+            disc(30.0, 10.0, 8.5, Material::Sand),
+            disc(22.0, 40.0, 3.5, Material::Vacuum),
+            disc(10.0, 10.0, 3.5, Material::Air),
+            disc(40.0, 30.0, 4.5, Material::Vacuum),
+            hex(1, 2, (50, 8), Material::Sand),
+            disc(12.0, 30.0, 3.5, Material::Water),
+            disc(45.0, 40.0, 2.5, Material::Slate),
+            hex(2, 3, (8, 20), Material::Water),
+            hex(3, 1, (60, 46), Material::Slate),
+            hex(4, 0, (33, 33), Material::Vacuum),
+            hex(5, 2, (0, 0), Material::Sand),
         ];
         for s in &stamps {
-            world.stamp(s.x, s.y, s.radius, s.material);
+            s.apply(&mut world);
         }
         for _ in 0..30 {
             world.step();

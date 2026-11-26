@@ -35,13 +35,19 @@ struct Params {
     materials: array<Properties, 6>,
 }
 
-// A brush stamp: centre (cell units, x and the half-cell-shifted y), radius, material
-// (a material, as encoded).
+// A brush stamp (`gpu::Stamp`): its kind (0 a disc, 1 a tetrahex), its material (as encoded); a
+// disc's radius and centre (cell units, x and the half-cell-shifted y); a tetrahex's superhex
+// radius and the axial centres of its four superhexes (`Placed`).
 struct Stamp {
+    kind: u32,
+    material: u32,
+    radius: f32,
+    hex_radius: i32,
     x: f32,
     y: f32,
-    radius: f32,
-    material: f32,
+    _pad0: u32,
+    _pad1: u32,
+    centres: array<vec2<i32>, 4>,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -597,11 +603,36 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&cells[4 * i + 3 - parity], encode_velocity(s.velocity));
 }
 
+// Axial coordinates (`lattice::to_axial`) and steps between cells (`hex_distance`).
+fn to_axial(x: i32, y: i32) -> vec2<i32> {
+    return vec2(x, y - (x - (x & 1)) / 2);
+}
+
+fn hex_distance(a: vec2<i32>, b: vec2<i32>) -> i32 {
+    let d = a - b;
+    return (abs(d.x) + abs(d.y) + abs(d.x + d.y)) / 2;
+}
+
+// Whether the stamp covers cell (x, y): `World::stamp`'s disc of centres, or `Placed::covers`.
+fn covers(stamp: Stamp, x: i32, y: i32) -> bool {
+    if stamp.kind == 0u {
+        let off = vec2(f32(x), f32(y) + 0.5 * f32(x & 1)) - vec2(stamp.x, stamp.y);
+        return off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius;
+    }
+    let p = to_axial(x, y);
+    for (var k = 0; k < 4; k++) {
+        if hex_distance(p, stamp.centres[k]) <= stamp.hex_radius {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The brush (`brush`, `World::paint`), between phases: a particle is spawned only into a cell holding
-// nothing; erasing
-// (vacuum) empties anything but bedrock; a painted particle intends to move down. Cells engaged in
-// a contract (an offer or a request out, one awaiting its verdict, or a particle in transport) are left alone.
-// Stamps apply in order.
+// insubstantial mass (air or vacuum; the air ceases to exist); erasing (vacuum) empties anything but
+// bedrock; a painted particle intends to move down. Cells engaged in a contract (an offer or a
+// request out, one awaiting its verdict, or a particle in transport) are left alone. Stamps apply
+// in order.
 @compute @workgroup_size(8, 8)
 fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
@@ -616,17 +647,15 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     if now.offer != 0u || now.request != 0u || now.accept != 0u || kept.offer != 0u || kept.request != 0u {
         return;
     }
-    let centre = vec2(f32(x), f32(y) + 0.5 * f32(x & 1));
     let word = atomicLoad(&cells[4 * i + parity]);
     var here = now.material;
     var painted = false;
     for (var s = 0u; s < params.stamps; s++) {
         let stamp = stamps[s];
-        let material = u32(stamp.material);
-        let off = centre - vec2(stamp.x, stamp.y);
-        if off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius
-            && here != material && here != BEDROCK
-            && (material == VACUUM || here == VACUUM) {
+        let material = stamp.material;
+        // Insubstantial: air or vacuum (`Material::is_substantial`).
+        let insubstantial = here == AIR || here == VACUUM;
+        if covers(stamp, x, y) && here != material && here != BEDROCK && (material == VACUUM || insubstantial) {
             here = material;
             painted = true;
         }

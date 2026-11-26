@@ -1,22 +1,30 @@
-//! Falling Entropy Engine, v01.05: air, water, sand, slate and bedrock in vacuum on a synchronized hex
-//! lattice, moved by contracts biased by the physics distribution. The lattice lives on the GPU; the
-//! brush paints sand, water, air or slate and erases to vacuum; the config panel tunes the physics, the rates, the cell size and the
-//! brush, and picks a preset scene.
+//! Falling Entropy Engine: air, water, sand, slate and bedrock in vacuum on a synchronized hex
+//! lattice, moved by contracts biased by the physics distribution. The lattices live on the GPU.
+//!
+//! The View: a 128 by 128 lattice drawn as hexagons at a chosen render resolution, centred; the
+//! toy cases beside it, each in its own lattice; the options panel on the other side (`view`,
+//! `toys`, `options`). The Brush stamps random tetrahexes: press, release, hold to repeat (`brush`).
+//! The config panel tunes the physics, the rates and the view, and picks the main lattice's scene.
 //!
 //! Native: `cargo run -p sand [-- --scene NAME]`. Web: `trunk serve` from this folder, with
 //! `?scene=NAME` to start in a scene. The harness: `cargo run -p sand -- strip|bench ...`.
 
+mod brush;
 mod gpu;
 #[cfg(not(target_arch = "wasm32"))]
 mod harness;
+mod options;
+mod toys;
+mod view;
 
 use std::sync::LazyLock;
 
 use engine::glam::Vec2;
-use engine::{App, Frame, Gpu, Input, Phase, Schema, Shapes, Tunable, Tuner, wgpu};
-use gpu::{Lattice, Pipelines, Readback, Stamp};
+use engine::{App, Frame, Gpu, Input, Phase, Schema, Screen, Shapes, Tunable, Tuner, wgpu};
+use gpu::{Lattice, Look, Pipelines, Readback, Shape, Stamp};
 use scenes::Scene;
-use sim::{Material, World};
+use sim::World;
+use view::{Fit, Layout, Rect};
 
 static SCENE_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(scenes::names);
 
@@ -24,9 +32,13 @@ static SCENE_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(scenes::names);
 pub struct Config {
     pub sim_rate: f32,
     pub max_phases: i32,
-    pub cell_size: f32,
+    pub lattice_size: i32,
+    pub hex_px: f32,
+    pub hex_edges: f32,
     pub scene: usize,
-    pub brush_radius: f32,
+    pub brush_size: i32,
+    pub brush_hold: f32,
+    pub brush_repeat: f32,
     pub tool: usize,
     pub gravity: i32,
     pub ceiling: i32,
@@ -51,9 +63,13 @@ impl Default for Config {
         Self {
             sim_rate: 240.0,
             max_phases: 16,
-            cell_size: 4.0,
+            lattice_size: 128,
+            hex_px: 0.0,
+            hex_edges: 0.22,
             scene: 0,
-            brush_radius: 3.0,
+            brush_size: 1,
+            brush_hold: 0.35,
+            brush_repeat: 0.12,
             tool: 0,
             gravity: p.gravity as i32,
             ceiling: p.ceiling as i32,
@@ -126,17 +142,18 @@ impl Tunable for Config {
             1..=64,
             |c| &mut c.max_phases,
         );
-        s.group("Lattice")
-            .float("cell_size", "Cell size (rebuilds)", "px", 1.0..=32.0, 0.5, |c| &mut c.cell_size)
+        s.group("View")
+            .int("lattice_size", "Lattice: cells across and down (rebuilds)", "", 8..=512, |c| &mut c.lattice_size)
+            .float("hex_px", "Render resolution: pixels per hexagon (0: the screen's)", "px", 0.0..=64.0, 1.0, |c| {
+                &mut c.hex_px
+            })
+            .float("hex_edges", "Hex edges: how dark", "", 0.0..=1.0, 0.01, |c| &mut c.hex_edges)
             .choice("scene", "Scene (rebuilds)", &SCENE_NAMES, |c| &mut c.scene);
-        s.group("Brush").choice("tool", "Tool", &["Sand", "Water", "Air", "Slate", "Erase"], |c| &mut c.tool).float(
-            "brush_radius",
-            "Radius",
-            "cells",
-            0.5..=40.0,
-            0.5,
-            |c| &mut c.brush_radius,
-        );
+        s.group("Brush")
+            .choice("tool", "Tool", &["Sand", "Water", "Air", "Slate", "Erase"], |c| &mut c.tool)
+            .int("brush_size", "Size: the radius of each hex", "cells", 0..=16, |c| &mut c.brush_size)
+            .float("brush_hold", "Hold before repeating", "s", 0.05..=2.0, 0.05, |c| &mut c.brush_hold)
+            .float("brush_repeat", "Repeat every", "s", 0.02..=1.0, 0.01, |c| &mut c.brush_repeat);
     }
 }
 
@@ -145,18 +162,22 @@ struct Game {
     pipelines: Option<Pipelines>,
     lattice: Option<Lattice>,
     /// What the lattice was built with, and whether a rebuild was asked for.
-    built: (f32, usize),
+    built: (i32, usize),
     rebuild: bool,
     /// Phases owed since the last render frame, and phases run since the scene was built.
     pending: u32,
     scene_phase: u32,
     stamps: Vec<Stamp>,
     script: Vec<scenes::Stamp>,
-    /// Where each held pointer last painted, in cell units.
-    strokes: Vec<(u64, Vec2)>,
-    /// Top-left and size of one cell, in pixels, as last drawn.
-    origin: Vec2,
-    cell: Vec2,
+    brush: brush::Brush,
+    toys: Vec<toys::Toy>,
+    /// The toy strip's scroll, in pixels, and where a drag on it last was.
+    scroll: f32,
+    scrolling: Option<Vec2>,
+    /// The layout and the main lattice's fit, as last drawn.
+    screen: Screen,
+    layout: Layout,
+    fit: Fit,
     /// Copy scene: while the config panel is open, the world is read back every few frames
     /// and kept as a painting's text. A phone's clipboard accepts text only during the tap,
     /// so the tap copies text that is already there.
@@ -171,21 +192,30 @@ struct Game {
 /// How often Copy scene's text is refreshed while the panel is open, in frames.
 const READ_EVERY: u32 = 15;
 
+/// The backdrop around the lattices: bedrock's colour, as outside a lattice reads as bedrock.
+const BACKDROP: wgpu::Color = wgpu::Color { r: 0.031, g: 0.035, b: 0.047, a: 1.0 };
+
 impl Game {
     fn new(tuner: Tuner<Config>) -> Self {
+        let screen = Screen::new(Vec2::new(800.0, 600.0), 1.0);
+        let layout = Layout::of(screen);
         Self {
             tuner,
             pipelines: None,
             lattice: None,
-            built: (0.0, 0),
+            built: (0, 0),
             rebuild: false,
             pending: 0,
             scene_phase: 0,
             stamps: Vec::new(),
             script: Vec::new(),
-            strokes: Vec::new(),
-            origin: Vec2::ZERO,
-            cell: Vec2::ONE,
+            brush: brush::Brush::default(),
+            toys: toys::all(),
+            scroll: 0.0,
+            scrolling: None,
+            screen,
+            layout,
+            fit: Fit::new(128, 128, layout.main, None, 0.0),
             readback: None,
             panel_open: false,
             frames_since_read: 0,
@@ -194,24 +224,54 @@ impl Game {
         }
     }
 
-    /// A pointer position in cell units, matching the brush shader's cell centres.
-    fn to_cells(&self, p: Vec2) -> Vec2 {
-        (p - self.origin) / self.cell - 0.5
+    fn size(&self) -> i32 {
+        self.tuner.current.lattice_size.max(8)
     }
 
-    fn stamp(&mut self, at: Vec2) {
-        let c = &self.tuner.current;
-        let material =
-            [Material::Sand, Material::Water, Material::Air, Material::Slate, Material::Vacuum][c.tool.min(4)];
-        self.stamps.push(Stamp { x: at.x, y: at.y, radius: c.brush_radius, material });
+    /// Lays everything out for this frame's screen.
+    fn arrange(&mut self, frame: &Frame) {
+        self.screen = frame.screen();
+        self.layout = Layout::of(self.screen);
+        let n = self.size();
+        self.fit = Fit::new(n, n, self.layout.main, None, self.tuner.current.hex_px);
     }
 
-    /// Stamps along a stroke, close enough that it leaves no gaps.
-    fn stroke(&mut self, from: Vec2, to: Vec2) {
-        let spacing = (self.tuner.current.brush_radius * 0.5).max(0.5);
-        let steps = ((to - from).length() / spacing).ceil().max(1.0) as u32;
-        for i in 1..=steps {
-            self.stamp(from.lerp(to, i as f32 / steps as f32));
+    fn toy_slots(&self) -> Vec<(Fit, Rect)> {
+        let l = &self.layout;
+        toys::arrange(
+            &self.toys,
+            l.toys,
+            l.portrait,
+            self.screen,
+            self.fit.scale(),
+            self.tuner.current.hex_px,
+            self.scroll,
+        )
+    }
+
+    /// The main lattice's cell under a screen point, if it's on the lattice.
+    fn cell_at(&self, p: Vec2) -> Option<(i32, i32)> {
+        let (x, y) = self.fit.cell_at(p);
+        let n = self.size();
+        (self.layout.main.contains(p) && (0..n).contains(&x) && (0..n).contains(&y)).then_some((x, y))
+    }
+
+    fn material(&self) -> sim::Material {
+        options::TOOLS[self.tuner.current.tool.min(options::TOOLS.len() - 1)].1
+    }
+
+    fn stamp(&mut self, placed: sim::Placed) {
+        self.stamps.push(Stamp { shape: Shape::Tetrahex(placed), material: self.material() });
+    }
+
+    fn option(&mut self, control: options::Control) {
+        let c = &mut self.tuner.current;
+        match control {
+            options::Control::Tool(i) => c.tool = i,
+            options::Control::Smaller => c.brush_size = (c.brush_size - 1).max(0),
+            options::Control::Larger => c.brush_size = (c.brush_size + 1).min(16),
+            options::Control::Clear => self.rebuild = true,
+            options::Control::Size => {}
         }
     }
 }
@@ -221,24 +281,48 @@ impl App for Game {
         1.0 / self.tuner.current.sim_rate
     }
 
-    fn input(&mut self, input: Input, _: &Frame) {
-        let Input::Pointer(p) = input else { return };
-        let at = self.to_cells(p.pos);
-        let held = self.strokes.iter().position(|&(id, _)| id == p.id);
-        match (p.phase, held) {
-            (Phase::Down, _) => {
-                self.stamp(at);
-                self.strokes.retain(|&(id, _)| id != p.id);
-                self.strokes.push((p.id, at));
+    fn input(&mut self, input: Input, frame: &Frame) {
+        let l = self.layout;
+        match input {
+            Input::Pointer(p) => match p.phase {
+                Phase::Down => {
+                    let cell = self.cell_at(p.pos);
+                    self.brush.down(p.id, cell, self.tuner.current.brush_size, frame.time);
+                }
+                Phase::Move => {
+                    if let Some(cell) = Some(self.fit.cell_at(p.pos)) {
+                        self.brush.moved(p.id, cell);
+                    }
+                }
+                Phase::Up => {
+                    if let Some(placed) = self.brush.up(p.id) {
+                        self.stamp(placed);
+                    }
+                }
+                Phase::Cancel => self.brush.cancel(),
+            },
+            Input::Secondary(_) => self.brush.cancel(),
+            Input::Tap(p) => {
+                if let Some(c) = options::at(l.options, l.portrait, self.screen, p) {
+                    self.option(c);
+                } else if l.toys.contains(p) {
+                    let slots = self.toy_slots();
+                    if let Some(i) = slots.iter().position(|(fit, _)| fit.rect().contains(p)) {
+                        self.toys[i].playing = !self.toys[i].playing;
+                    }
+                }
             }
-            (Phase::Move, Some(i)) => {
-                let from = self.strokes[i].1;
-                self.stroke(from, at);
-                self.strokes[i].1 = at;
+            Input::DragStart(p) if l.toys.contains(p) => self.scrolling = Some(p),
+            Input::Drag(p) => {
+                if let Some(last) = self.scrolling {
+                    let d = if l.portrait { last.x - p.x } else { last.y - p.y };
+                    let slots = self.toy_slots();
+                    let room = toys::scroll_room(&slots, l.toys, l.portrait, self.scroll);
+                    self.scroll = (self.scroll + d).clamp(0.0, room);
+                    self.scrolling = Some(p);
+                }
             }
-            (Phase::Up | Phase::Cancel, Some(i)) => {
-                self.strokes.remove(i);
-            }
+            Input::DragEnd(_) => self.scrolling = None,
             _ => {}
         }
     }
@@ -247,7 +331,14 @@ impl App for Game {
         self.pending += 1;
     }
 
-    fn frame(&mut self, _: &Frame, _: &mut Shapes) {}
+    fn frame(&mut self, frame: &Frame, shapes: &mut Shapes) {
+        self.arrange(frame);
+        let l = self.layout;
+        let c = &self.tuner.current;
+        options::draw(shapes, l.options, l.portrait, self.screen, c.tool, c.brush_size);
+        let slots = self.toy_slots();
+        toys::draw(shapes, &self.toys, &slots, l.toys, self.screen);
+    }
 
     fn gpu_init(&mut self, gpu: &Gpu) {
         self.pipelines = Some(Pipelines::new(gpu.device, gpu.format));
@@ -260,21 +351,13 @@ impl App for Game {
         target: &wgpu::TextureView,
         frame: &Frame,
     ) -> bool {
+        self.arrange(frame);
         let Some(pipelines) = self.pipelines.as_ref() else { return false };
-        let c = &self.tuner.current;
-        let wanted = (c.cell_size, c.scene);
+        let c = self.tuner.current.clone();
+        let n = self.size();
+        let wanted = (n, c.scene);
         if self.lattice.is_none() || self.rebuild || wanted != self.built {
-            // The lattice is sized once, to fill the screen at this cell size; later
-            // resizes scale it to fit rather than rebuilding it.
-            let px = c.cell_size * frame.scale;
-            let width = (frame.size.x / px) as i32;
-            let height = (frame.size.y / px - 0.5) as i32;
-            if width < 8 || height < 8 {
-                // Not laid out yet (a hidden or collapsed page reports a tiny viewport): wait,
-                // rather than build a lattice a few cells across that later resizes only stretch.
-                return false;
-            }
-            let mut world = World::new(width, height);
+            let mut world = World::new(n, n);
             c.scene().build(&mut world);
             self.lattice = Some(Lattice::new(gpu.device, pipelines, &world));
             self.built = wanted;
@@ -283,32 +366,68 @@ impl App for Game {
             self.stamps.clear();
             self.scene_text = None;
         }
-        let lattice = self.lattice.as_ref().expect("lattice");
+        for toy in &mut self.toys {
+            if toy.lattice.is_none() {
+                let (w, h) = toy.scene.size;
+                let mut world = World::new(w, h);
+                toy.scene.build(&mut world);
+                toy.lattice = Some(Lattice::new(gpu.device, pipelines, &world));
+            }
+        }
 
-        let span = Vec2::new(lattice.width as f32, lattice.height as f32 + 0.5);
-        let px = (frame.size / span).min_element();
-        self.cell = Vec2::splat(px);
-        self.origin = ((frame.size - span * px) * 0.5).floor();
+        // Holding the brush confirms its ghost again and again.
+        let material = self.material();
+        for placed in self.brush.held(frame.time, c.brush_hold, c.brush_repeat) {
+            self.stamps.push(Stamp { shape: Shape::Tetrahex(placed), material });
+        }
 
-        let phases = self.pending.min(self.tuner.current.max_phases.max(1) as u32);
+        let phases = self.pending.min(c.max_phases.max(1) as u32);
         self.pending = 0;
-        // The scene's script for the phases this frame runs, applied with the player's strokes.
+        let physics = c.physics();
+        let disc =
+            |s: &scenes::Stamp| Stamp { shape: Shape::Disc { x: s.x, y: s.y, radius: s.radius }, material: s.material };
+
+        // The main lattice: the scene's script for the phases this frame runs, with the player's stamps.
+        let lattice = self.lattice.as_ref().expect("lattice");
         self.script.clear();
-        let scene = self.tuner.current.scene();
         for p in self.scene_phase..self.scene_phase + phases {
-            scene.stamps(p, lattice.width, lattice.height, &mut self.script);
+            c.scene().stamps(p, lattice.width, lattice.height, &mut self.script);
         }
         self.scene_phase += phases;
-        self.stamps.extend(self.script.iter().map(|s| Stamp {
-            x: s.x,
-            y: s.y,
-            radius: s.radius,
-            material: s.material,
-        }));
-        let physics = self.tuner.current.physics();
+        self.stamps.extend(self.script.iter().map(disc));
         lattice.simulate(gpu.queue, pipelines, encoder, &self.stamps, &physics, phases);
         self.stamps.clear();
-        lattice.render(gpu.queue, pipelines, encoder, target, self.origin.into(), self.cell.into());
+        let size = frame.size;
+        let whole = Rect::new(Vec2::ZERO, size);
+        let look = |fit: &Fit, ghost| Look {
+            size: fit.size,
+            texel: fit.texel,
+            origin: fit.origin.into(),
+            edges: c.hex_edges,
+            ghost,
+        };
+        let ghost = self.brush.ghost().map(|g| (g, self.material()));
+        let clip = self.fit.rect().clip(&whole, size);
+        lattice.render(gpu.queue, pipelines, encoder, target, &look(&self.fit, ghost), clip, Some(BACKDROP));
+
+        // The toy cases: each plays only once tapped.
+        let slots = self.toy_slots();
+        for (toy, (fit, _)) in self.toys.iter_mut().zip(&slots) {
+            let lattice = toy.lattice.as_ref().expect("toy lattice");
+            if toy.playing {
+                self.script.clear();
+                for p in toy.phase..toy.phase + phases {
+                    toy.scene.stamps(p, lattice.width, lattice.height, &mut self.script);
+                }
+                toy.phase += phases;
+                let stamps: Vec<Stamp> = self.script.iter().map(disc).collect();
+                lattice.simulate(gpu.queue, pipelines, encoder, &stamps, &physics, phases);
+            }
+            let clip = fit.rect().clip(&self.layout.toys, size);
+            if clip[2] > 0 && clip[3] > 0 {
+                lattice.render(gpu.queue, pipelines, encoder, target, &look(fit, None), clip, None);
+            }
+        }
         self.read_scene(gpu, encoder);
         true
     }

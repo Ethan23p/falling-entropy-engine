@@ -47,3 +47,21 @@ pub fn neighbor(x: i32, y: i32, d: Dir) -> (i32, i32) {
         Dir::UpLeft => (x - 1, y - 1 + odd),
     }
 }
+
+/// A cell's axial coordinates `(q, r)`: `q` is its column and `r` leans with the lattice, so each of
+/// the six neighbors is a unit step: up `(0, -1)`, up-right `(1, -1)`, down-right `(1, 0)`, down
+/// `(0, 1)`, down-left `(-1, 1)`, up-left `(-1, 0)`. Shapes on the lattice are built in these.
+pub fn to_axial(x: i32, y: i32) -> (i32, i32) {
+    (x, y - (x - (x & 1)) / 2)
+}
+
+/// The cell at axial `(q, r)`, as `(x, y)`.
+pub fn from_axial(q: i32, r: i32) -> (i32, i32) {
+    (q, r + (q - (q & 1)) / 2)
+}
+
+/// Steps between two cells, in axial coordinates.
+pub fn hex_distance(a: (i32, i32), b: (i32, i32)) -> i32 {
+    let (dq, dr) = (a.0 - b.0, a.1 - b.1);
+    (dq.abs() + dr.abs() + (dq + dr).abs()) / 2
+}

@@ -38,6 +38,8 @@ pub struct Scene {
     pub about: &'static str,
     pub build: Build,
     pub script: Option<Script>,
+    /// The toy case's own lattice, as the toy-case display runs it: small cases on small lattices.
+    pub size: (i32, i32),
 }
 
 impl Scene {
@@ -59,74 +61,97 @@ impl Scene {
 
 /// Every scene, in the order the game lists them. The first is the blank lattice.
 pub const ALL: &[Scene] = &[
-    Scene { name: "empty", about: "a blank lattice", build: Build::Code(|_| {}), script: None },
-    Scene { name: "packed", about: "a lattice packed with sand and air", build: Build::Code(packed), script: None },
+    Scene { name: "empty", about: "a blank lattice", build: Build::Code(|_| {}), script: None, size: (128, 128) },
+    Scene {
+        name: "packed",
+        about: "a lattice packed with sand and air",
+        build: Build::Code(packed),
+        script: None,
+        size: (16, 16),
+    },
     Scene {
         name: "packed-vacuum",
         about: "a lattice packed with sand and air and one cell of vacuum",
         build: Build::Code(packed_vacuum),
         script: None,
+        size: (16, 16),
     },
-    Scene { name: "pour", about: "sand poured onto a floor", build: Build::Code(|_| {}), script: Some(pour) },
+    Scene {
+        name: "pour",
+        about: "sand poured onto a floor",
+        build: Build::Code(|_| {}),
+        script: Some(pour),
+        size: (48, 32),
+    },
     Scene {
         name: "silo",
         about: "a slate silo full of sand with a small leak in the bottom, open air outside",
         build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::Air)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "silo-wide",
         about: "the silo with a large leak in the bottom",
         build: Build::Code(|w| silo(w, Leak::BottomLarge, Outside::Air)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "silo-wider",
         about: "the silo with a leak across most of its bottom",
         build: Build::Code(|w| silo(w, Leak::BottomWider, Outside::Air)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "silo-side",
         about: "the silo with a leak in its side",
         build: Build::Code(|w| silo(w, Leak::Side, Outside::Air)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "silo-vacuum",
         about: "the silo with a small leak, vacuum outside",
         build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::Vacuum)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "silo-limited-air",
         about: "the silo with a small leak, vacuum outside but for a layer of air on the floor",
         build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::LimitedAir)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "silo-water",
         about: "the silo with a small leak, standing in water",
         build: Build::Code(|w| silo(w, Leak::BottomSmall, Outside::Water)),
         script: None,
+        size: (48, 40),
     },
     Scene {
         name: "water-drop",
         about: "one water in the center of an all-vacuum lattice",
         build: Build::Code(water_drop),
         script: None,
+        size: (16, 16),
     },
     Scene {
         name: "packed-water",
         about: "a lattice packed with water and many cells of vacuum",
         build: Build::Code(packed_water),
         script: None,
+        size: (24, 24),
     },
     Scene {
         name: "pour-water",
         about: "water poured into an all-vacuum lattice",
         build: Build::Code(fill_vacuum),
         script: Some(pour_water),
+        size: (48, 32),
     },
 ];
 
