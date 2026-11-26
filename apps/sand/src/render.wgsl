@@ -18,7 +18,8 @@ struct View {
     // The ghost: the brush's pending stamp (`Placed`), its superhex radius (-1: none) and material.
     ghost_radius: i32,
     ghost_material: u32,
-    _pad0: u32,
+    // 1: cells draw as square bricks, 2 across, in the same column-offset pattern.
+    bricks: u32,
     _pad1: u32,
     _pad2: u32,
     // Each centre in .xy (a uniform array's stride is 16 bytes).
@@ -91,19 +92,33 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let v = floor((pos.xy - view.origin) / view.texel) + 0.5;
     // Relative to cell (0, 0)'s centre, then to fractional axial coordinates (`lattice::to_axial`).
     let s = view.size;
-    let p = v - vec2(s, 0.5 * SQRT3 * s);
-    let a = round_axial(p.x * 2.0 / (3.0 * s), (-p.x / 3.0 + p.y * SQRT3 / 3.0) / s);
-    let x = a.x;
-    let y = a.y + (a.x - (a.x & 1)) / 2;
+    var x: i32;
+    var y: i32;
+    // How far inside its cell's edge the pixel is, in virtual pixels.
+    var inset: f32;
+    if view.bricks == 1u {
+        x = i32(floor(v.x / (2.0 * s)));
+        let down = v.y / (2.0 * s) - 0.5 * f32(x & 1);
+        y = i32(floor(down));
+        let local = vec2(v.x - 2.0 * s * f32(x), 2.0 * s * (down - f32(y)));
+        inset = min(min(local.x, 2.0 * s - local.x), min(local.y, 2.0 * s - local.y));
+    } else {
+        let p = v - vec2(s, 0.5 * SQRT3 * s);
+        let h = round_axial(p.x * 2.0 / (3.0 * s), (-p.x / 3.0 + p.y * SQRT3 / 3.0) / s);
+        x = h.x;
+        y = h.y + (h.x - (h.x & 1)) / 2;
+        let centre = vec2(1.5 * s * f32(h.x), SQRT3 * s * (f32(h.y) + 0.5 * f32(h.x)));
+        let d = abs(p - centre);
+        inset = 0.5 * SQRT3 * s - max(d.y, 0.5 * SQRT3 * d.x + 0.5 * d.y);
+    }
     if x < 0 || x >= view.width || y < 0 || y >= view.height {
         discard;
     }
+    // Axial coordinates (`lattice::to_axial`), for the ghost.
+    let a = vec2(x, y - (x - (x & 1)) / 2);
     var c = color(cells[current(y * view.width + x)] & 7u);
 
-    // Hex edges: darker within a virtual pixel of the hexagon's sides.
-    let centre = vec2(1.5 * s * f32(a.x), SQRT3 * s * (f32(a.y) + 0.5 * f32(a.x)));
-    let d = abs(p - centre);
-    let inset = 0.5 * SQRT3 * s - max(d.y, 0.5 * SQRT3 * d.x + 0.5 * d.y);
+    // Edges: darker within a virtual pixel of the cell's sides.
     if inset < 1.0 && s >= 3.0 {
         c = c * (1.0 - view.edges);
     }

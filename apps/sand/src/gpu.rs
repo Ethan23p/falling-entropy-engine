@@ -254,7 +254,7 @@ impl Lattice {
             Some((t, m)) => (t.radius, m as u32, t.centres),
             None => (-1, 0, [(0, 0); 4]),
         };
-        data.extend(words(&[radius as u32, material, 0, 0, 0]));
+        data.extend(words(&[radius as u32, material, look.bricks as u32, 0, 0]));
         for (q, r) in centres {
             data.extend(words(&[q as u32, r as u32, 0, 0]));
         }
@@ -295,6 +295,8 @@ pub struct Look {
     pub origin: [f32; 2],
     /// How dark hex edges draw, 0 to 1.
     pub edges: f32,
+    /// Cells drawn as square bricks rather than hexagons.
+    pub bricks: bool,
     pub ghost: Option<(sim::Placed, sim::Material)>,
 }
 

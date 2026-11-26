@@ -35,10 +35,12 @@ pub struct Config {
     pub lattice_size: i32,
     pub hex_px: f32,
     pub hex_edges: f32,
+    pub cell_shape: usize,
     pub scene: usize,
     pub brush_size: i32,
     pub brush_hold: f32,
     pub brush_repeat: f32,
+    pub brush_offset: f32,
     pub tool: usize,
     pub gravity: i32,
     pub ceiling: i32,
@@ -66,10 +68,12 @@ impl Default for Config {
             lattice_size: 128,
             hex_px: 0.0,
             hex_edges: 0.22,
+            cell_shape: 0,
             scene: 0,
             brush_size: 1,
-            brush_hold: 0.35,
-            brush_repeat: 0.12,
+            brush_hold: 1.0,
+            brush_repeat: 1.0,
+            brush_offset: 5.0,
             tool: 0,
             gravity: p.gravity as i32,
             ceiling: p.ceiling as i32,
@@ -147,13 +151,15 @@ impl Tunable for Config {
             .float("hex_px", "Render resolution: pixels per hexagon (0: the screen's)", "px", 0.0..=64.0, 1.0, |c| {
                 &mut c.hex_px
             })
-            .float("hex_edges", "Hex edges: how dark", "", 0.0..=1.0, 0.01, |c| &mut c.hex_edges)
+            .float("hex_edges", "Cell edges: how dark", "", 0.0..=1.0, 0.01, |c| &mut c.hex_edges)
+            .choice("cell_shape", "Cells drawn as", &["Hexagons", "Square bricks"], |c| &mut c.cell_shape)
             .choice("scene", "Scene (rebuilds)", &SCENE_NAMES, |c| &mut c.scene);
         s.group("Brush")
             .choice("tool", "Tool", &["Sand", "Water", "Air", "Slate", "Erase"], |c| &mut c.tool)
             .int("brush_size", "Size: the radius of each hex", "cells", 0..=16, |c| &mut c.brush_size)
-            .float("brush_hold", "Hold before repeating", "s", 0.05..=2.0, 0.05, |c| &mut c.brush_hold)
-            .float("brush_repeat", "Repeat every", "s", 0.02..=1.0, 0.01, |c| &mut c.brush_repeat);
+            .float("brush_hold", "Hold before repeating", "s", 0.05..=4.0, 0.05, |c| &mut c.brush_hold)
+            .float("brush_repeat", "Repeat every", "s", 0.02..=3.0, 0.01, |c| &mut c.brush_repeat)
+            .float("brush_offset", "Ghost above the pointer", "em", 0.0..=12.0, 0.25, |c| &mut c.brush_offset);
     }
 }
 
@@ -215,13 +221,22 @@ impl Game {
             scrolling: None,
             screen,
             layout,
-            fit: Fit::new(128, 128, layout.main, None, 0.0),
+            fit: Fit::new(128, 128, layout.main, None, 0.0, false),
             readback: None,
             panel_open: false,
             frames_since_read: 0,
             scene_text: None,
             copied: 0,
         }
+    }
+
+    fn bricks(&self) -> bool {
+        self.tuner.current.cell_shape == 1
+    }
+
+    /// Where the ghost goes for a pointer at `p`: a little above it, clear of the finger.
+    fn aim(&self, p: Vec2) -> Vec2 {
+        p - Vec2::new(0.0, self.screen.em(self.tuner.current.brush_offset))
     }
 
     fn size(&self) -> i32 {
@@ -233,7 +248,7 @@ impl Game {
         self.screen = frame.screen();
         self.layout = Layout::of(self.screen);
         let n = self.size();
-        self.fit = Fit::new(n, n, self.layout.main, None, self.tuner.current.hex_px);
+        self.fit = Fit::new(n, n, self.layout.main, None, self.tuner.current.hex_px, self.bricks());
     }
 
     fn toy_slots(&self) -> Vec<(Fit, Rect)> {
@@ -245,15 +260,18 @@ impl Game {
             self.screen,
             self.fit.scale(),
             self.tuner.current.hex_px,
+            self.bricks(),
             self.scroll,
         )
     }
 
-    /// The main lattice's cell under a screen point, if it's on the lattice.
+    /// The cell the ghost aims at for a press at `p`, if the press is on the main lattice. The
+    /// aimed cell itself may be past the lattice's top; the stamp then paints what lands on it.
     fn cell_at(&self, p: Vec2) -> Option<(i32, i32)> {
         let (x, y) = self.fit.cell_at(p);
         let n = self.size();
-        (self.layout.main.contains(p) && (0..n).contains(&x) && (0..n).contains(&y)).then_some((x, y))
+        let on = self.layout.main.contains(p) && (0..n).contains(&x) && (0..n).contains(&y);
+        on.then(|| self.fit.cell_at(self.aim(p)))
     }
 
     fn material(&self) -> sim::Material {
@@ -290,9 +308,7 @@ impl App for Game {
                     self.brush.down(p.id, cell, self.tuner.current.brush_size, frame.time);
                 }
                 Phase::Move => {
-                    if let Some(cell) = Some(self.fit.cell_at(p.pos)) {
-                        self.brush.moved(p.id, cell);
-                    }
+                    self.brush.moved(p.id, self.fit.cell_at(self.aim(p.pos)));
                 }
                 Phase::Up => {
                     if let Some(placed) = self.brush.up(p.id) {
@@ -404,6 +420,7 @@ impl App for Game {
             texel: fit.texel,
             origin: fit.origin.into(),
             edges: c.hex_edges,
+            bricks: fit.bricks,
             ghost,
         };
         let ghost = self.brush.ghost().map(|g| (g, self.material()));
