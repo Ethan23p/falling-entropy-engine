@@ -9,7 +9,7 @@ use engine::wgpu;
 /// The most stamps one brush pass applies.
 pub const MAX_STAMPS: usize = 256;
 /// The sim's uniforms: four words, then four per material (`Params` in sim.wgsl).
-const PARAMS_BYTES: u64 = 4 * (4 + 4 * 6);
+const PARAMS_BYTES: u64 = 4 * (8 + 4 * 6);
 
 /// A brush stamp, in cell units: `y` already includes odd columns' half-cell shift.
 #[derive(Clone, Copy, Debug)]
@@ -155,9 +155,10 @@ impl Lattice {
     ) {
         let stamps = &stamps[stamps.len().saturating_sub(MAX_STAMPS)..];
         let p = physics;
-        // The lattice's size, the stamp count and gravity, then each material's properties
-        // (mass, into, deflect, padding), in encoded order.
-        let mut params = vec![self.width as u32, self.height as u32, stamps.len() as u32, p.gravity];
+        // The lattice's size, the stamp count, gravity and inertia (padded), then each material's
+        // properties (mass, into, deflect, padding), in encoded order.
+        let mut params =
+            vec![self.width as u32, self.height as u32, stamps.len() as u32, p.gravity, p.inertia, 0, 0, 0];
         for m in &p.materials {
             params.extend([m.mass, m.into, m.deflect, 0]);
         }

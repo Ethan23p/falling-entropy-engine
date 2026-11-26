@@ -340,17 +340,19 @@ fn propose_a_new_particle_intends_to_move_down() {
 
 #[test]
 fn propose_follows_velocity() {
-    // Straight down is favored; the lower diagonals less; never against the velocity.
+    // Straight down is favored; the lower diagonals less; against the velocity, all but never.
     let counts = proposals(sand(DOWN), around(&[]), &Physics::default());
     let down = counts[Dir::Down as usize];
     let diagonals = counts[Dir::DownLeft as usize] + counts[Dir::DownRight as usize];
     let upward = counts[Dir::Up as usize] + counts[Dir::UpLeft as usize] + counts[Dir::UpRight as usize];
     assert!(down > diagonals && diagonals > 0, "{counts:?}");
-    assert_eq!(upward + counts[6], 0, "{counts:?}");
+    assert!(upward <= 4 && counts[6] == 0, "{counts:?}");
     // A sideways velocity leans the other way.
     let counts = proposals(sand(Velocity { x: 256, y: 0 }), around(&[]), &Physics::default());
     assert!(counts[Dir::UpRight as usize] > 0 && counts[Dir::DownRight as usize] > 0, "{counts:?}");
-    assert_eq!(counts[Dir::Up as usize] + counts[Dir::Down as usize] + counts[Dir::UpLeft as usize], 0);
+    // Up and down are at right angles to it: rare. The left diagonals are against it: never.
+    assert!(counts[Dir::Up as usize] + counts[Dir::Down as usize] <= 40, "{counts:?}");
+    assert_eq!(counts[Dir::UpLeft as usize] + counts[Dir::DownLeft as usize], 0, "{counts:?}");
 }
 
 #[test]
@@ -486,14 +488,14 @@ fn evaluate_air_with_its_offer_out_still_gives_way_to_sand() {
 }
 
 #[test]
-fn resolve_an_offer_of_air_that_was_overwritten_has_no_effect() {
-    // The contract's conditions absorb the change: the air I offered is gone, sand is here now.
+fn resolve_an_offer_of_air_that_was_overwritten_keeps_the_sand() {
+    // The air I offered is gone, sand is here now; resolving the air's offer doesn't lose it.
     let kept = State { offer: Some(Dir::Down), ..State::AIR };
     let me = State { accept: Some(Dir::Up), ..sand(DOWN) };
     for accept in [Some(Dir::Up), None] {
         let seen = around(&[(Dir::Down, State { accept, ..State::AIR })]);
         let s = next(me, kept, seen, 2, 2, 0, &Physics::default());
-        assert_eq!((s.material, s.velocity), (Material::Sand, DOWN));
+        assert_eq!(s.material, Material::Sand);
     }
 }
 
@@ -709,7 +711,7 @@ fn movement_a_grain_reaches_the_floor() {
 }
 
 #[test]
-fn movement_a_heap_holds_its_slope_and_goes_still() {
+fn movement_a_heap_holds_its_slope_and_nearly_stills() {
     let mut w = World::new(40, 20);
     for p in 0..3000u32 {
         if p % 12 == 0 && p < 1800 {
@@ -721,9 +723,11 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
     for _ in 0..50 {
         w.step();
     }
-    assert_eq!(materials(&w), before, "{}", w.ascii());
+    // A grain now and then still rolls down the face (v01.06: 12 cells changed in 50 phases).
+    let changed = materials(&w).iter().zip(&before).filter(|(a, b)| a != b).count();
+    assert!(changed <= 24, "{changed} changed\n{}", w.ascii());
     // A heap, not a layer: the middle column stands above the edges. (Sand's small deflection
-    // lowered it from 6 rows of rise to 4 in v01.05.)
+    // lowered it from 6 rows of rise to 4 in v01.05; inertia's weighting keeps 4 in v01.06.)
     let top = |x: i32| (0..20).find(|&y| w.material(x, y) == Material::Sand).unwrap_or(20);
     assert!(top(20) + 3 < top(5), "{}", w.ascii());
 }
@@ -733,13 +737,14 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
 #[test]
 fn propose_nothing_offers_into_slate() {
     let slate = State::holding(Material::Slate);
-    // Vacuum only straight up, where velocity never reaches.
+    // Vacuum only straight up, straight against the velocity: sand, heavy, never offers there, and
+    // so proposes nothing. Slate is never offered into.
     let seen = [State::VACUUM, slate, slate, slate, slate, slate];
     let p = Physics::default();
-    for m in [Material::Sand, Material::Water] {
-        let n = proposals(State::holding(m), seen, &p);
-        assert_eq!(n[6], 4000, "{m:?} proposes nothing: {n:?}");
-    }
+    let n = proposals(State::holding(Material::Sand), seen, &p);
+    assert_eq!(n[6], 4000, "sand proposes nothing: {n:?}");
+    let n = proposals(State::holding(Material::Water), seen, &p);
+    assert_eq!(n[Dir::Up as usize] + n[6], 4000, "water offers only up, if at all: {n:?}");
 }
 
 #[test]
@@ -781,7 +786,7 @@ fn evaluate_water_rejects_sand_nothing_is_swapped_or_displaced() {
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(water(DOWN), State::AIR, seen, 2, 2, 0, &Physics::default());
     assert_eq!((s.material, s.accept), (Material::Water, None));
-    assert!(Physics::default().offers_to(Material::Sand, DOWN, Dir::Down, Material::Water));
+    assert!(Physics::default().offers_to(Material::Sand, Material::Water));
 }
 
 #[test]
@@ -836,6 +841,7 @@ fn movement_water_seeks_its_level_where_sand_heaps() {
     let (min, max) = (depth.iter().min().unwrap(), depth.iter().max().unwrap());
     assert!(max - min <= 5, "water depths {depth:?}\n{}", w.ascii());
     let s = pour(Material::Sand);
+    // (v01.06: the heap is steep-sided, so its rise is measured out at the edge, column 2.)
     let top = |x: i32| (0..20).find(|&y| s.material(x, y) == Material::Sand).unwrap_or(20);
-    assert!(top(20) + 3 < top(5), "{}", s.ascii());
+    assert!(top(20) + 3 < top(2), "{}", s.ascii());
 }

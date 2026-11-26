@@ -21,12 +21,16 @@ struct Properties {
 }
 
 // The lattice's size and the stamp count, then the physics distribution's data (`Physics`):
-// gravity, and each material's properties, indexed by its encoded value.
+// gravity, inertia, and each material's properties, indexed by its encoded value.
 struct Params {
     width: i32,
     height: i32,
     stamps: u32,
     gravity: u32,
+    inertia: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
     materials: array<Properties, 6>,
 }
 
@@ -57,7 +61,8 @@ const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
 const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
-const ALONG_CAP: u32 = 1024u;
+const WEIGHT_TOP: u32 = 65536u;
+const HALVINGS_CAP: u32 = 16u;
 const DEFLECT_CAP: u32 = 1024u;
 const SCALE: i32 = 256;
 
@@ -205,12 +210,20 @@ fn deflection(m: u32) -> u32 {
     return min(params.materials[m].deflect, DEFLECT_CAP);
 }
 
-// `Physics::offers_to`, propose's exclusion: what might a cell holding a particle of m, intending
-// v, offer to? A neighbor toward d holding nothing, or a particle that moves and that m is amenable
-// to, lying ahead of the intent (provisional: within 90 degrees, a hard limit for every material).
-fn offers_to(m: u32, v: vec2<i32>, d: u32, dest: u32) -> bool {
-    let amenable = !is_particle(dest) || (moves(dest) && into(dest) > 0u);
-    return moves(m) && amenable && along(v, d) > 0;
+// `Physics::offers_to`, propose's exclusion: only the physically impossible. A particle that
+// doesn't move offers nothing, and nothing offers into a static particle.
+fn offers_to(m: u32, dest: u32) -> bool {
+    return moves(m) && !is_static(dest) && into(dest) > 0u;
+}
+
+// `Physics::air_meets_vacuum`: a cell holding air with vacuum in its neighborhood offers only into
+// the vacuum.
+fn air_meets_vacuum(m: u32, seen: ptr<function, array<State, 6>>) -> bool {
+    var found = false;
+    for (var d = 0u; d < 6u; d++) {
+        found = found || (*seen)[d].material == VACUUM;
+    }
+    return m == AIR && found;
 }
 
 // `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a substantial
@@ -221,10 +234,47 @@ fn entertains(offered: u32, dest: u32) -> bool {
     return moves(offered) && room;
 }
 
+// `physics::isqrt`.
+fn isqrt(n0: u32) -> u32 {
+    var n = n0;
+    var r = 0u;
+    var bit = 1u << 30u;
+    while bit > n {
+        bit = bit >> 2u;
+    }
+    while bit != 0u {
+        if n >= r + bit {
+            n -= r + bit;
+            r = (r >> 1u) + bit;
+        } else {
+            r = r >> 1u;
+        }
+        bit = bit >> 2u;
+    }
+    return r;
+}
+
+// `Physics::preference`: halving with the turn from the velocity, as many times as inertia and
+// mass say.
+fn preference(m: u32, v: vec2<i32>, d: u32) -> u32 {
+    let s = step_of(d);
+    let norm = i32(isqrt(u32((v.x * v.x + v.y * v.y) * (s.x * s.x + s.y * s.y))));
+    var turn = 1024u;
+    if norm != 0 {
+        turn = u32(clamp(1024 - along(v, d) * 1024 / norm, 0, 2048));
+    }
+    let halvings = (min(params.inertia, 256u) * mass(m) * turn) >> 4u;
+    let whole = halvings >> 10u;
+    if whole >= HALVINGS_CAP {
+        return 0u;
+    }
+    let w = WEIGHT_TOP >> whole;
+    return w - ((w * (halvings & 1023u)) >> 11u);
+}
+
 // `Physics::weight`.
 fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
-    let a = min(u32(max(along(v, d), 0)), ALONG_CAP);
-    return into(dest) * mass(m) * ((a * a) >> 8u);
+    return into(dest) * mass(m) * preference(m, v, d);
 }
 
 // `Physics::moved`, gravity: its impulse, added on a move, then back to the steady scale.
@@ -310,7 +360,7 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     let committed = me.offer != 0u;
 
     // Resolve: the offer kept back has its verdict now; apply the contract's effect on its origin.
-    if kept.offer != 0u && live.material == kept.material {
+    if kept.offer != 0u {
         let d = kept.offer - 1u;
         if accepted(d, (*seen)[d]) {
             if is_substantial(kept.material) {
@@ -325,8 +375,8 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
 
     // Evaluate: the offers that target me, excluded unless the physics distribution entertains them,
     // the rest weighted; the one selected is accepted. Holding one particle at most, I then exclude
-    // the rest, which are rejected by not being named. A committed cell evaluates too: committed air
-    // can still be overwritten.
+    // the rest, which are rejected by not being named. A committed cell evaluates too: what it can
+    // take is the capacity limit's to say.
     {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
@@ -348,9 +398,13 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // weighted.
     if !committed {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+        let only_vacuum = air_meets_vacuum(live.material, seen);
         for (var d = 0u; d < 6u; d++) {
             let dest = (*seen)[d].material;
-            if offers_to(live.material, live.velocity, d, dest) {
+            if only_vacuum && dest != VACUUM {
+                continue;
+            }
+            if offers_to(live.material, dest) {
                 weights[d] = weight(live.material, live.velocity, d, dest);
             }
         }

@@ -6,7 +6,7 @@
 
 use crate::contract::{Offer, Verdict};
 use crate::selection::select;
-use crate::{Dir, Physics, State, hash};
+use crate::{Dir, Material, Physics, State, hash};
 
 /// Salts for the selections, so they draw independent random bits.
 pub const SALT_EVALUATE: u32 = 1;
@@ -43,11 +43,6 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
 fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let Some(offer) = Offer::of(kept) else { return };
     let verdict = offer.verdict(seen[offer.toward as usize]);
-    // The terms absorb a change in context: if the particle I offered is no longer here (air,
-    // overwritten while its offer was out), the offer has no effect on me.
-    if live.material != kept.material {
-        return;
-    }
     let (mine, _) = offer.terms(verdict, kept, hash(x, y, phase, SALT_DEFLECT));
     mine.apply(live, physics);
 }
@@ -58,6 +53,7 @@ fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, pha
 /// the target. A rejected offer's terms have no effect on me.
 /// While contracts remain I would select again, but a cell holds one particle at most: once one is
 /// accepted, the capacity limit excludes the rest, and they are rejected by not being named.
+#[allow(clippy::too_many_arguments)]
 fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
     for d in Dir::ALL {
@@ -76,13 +72,18 @@ fn evaluate(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, phy
 fn evolve(_live: &mut State) {}
 
 /// Propose: the particle I host offers to move toward a neighbor, following its velocity. Start
-/// with all six neighbors, exclude those it wouldn't offer to (`Physics::offers_to`), and select
-/// among the rest, weighted. Offering commits the particle.
+/// with all six neighbors, exclude the incompatible (`Physics::offers_to`), and select among the
+/// rest, weighted. Air with vacuum in its neighborhood offers into the vacuum
+/// (`Physics::air_meets_vacuum`). Offering commits the particle.
 fn propose(live: &mut State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let mut weights = [0; 6];
+    let only_vacuum = physics.air_meets_vacuum(live.material, seen);
     for d in Dir::ALL {
         let target = seen[d as usize].material;
-        if physics.offers_to(live.material, live.velocity, d, target) {
+        if only_vacuum && target != Material::Vacuum {
+            continue;
+        }
+        if physics.offers_to(live.material, target) {
             weights[d as usize] = physics.weight(live.material, live.velocity, d, target);
         }
     }
