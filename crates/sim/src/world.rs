@@ -30,6 +30,9 @@ pub struct World {
     width: i32,
     height: i32,
     cells: Vec<u32>,
+    /// The brush's offers waiting on each cell (`brush`): 1 + a material in bits 0-7 (0: none),
+    /// the phases left to wait in bits 8-15.
+    pub(crate) brush: Vec<u32>,
     pub physics: Physics,
 }
 
@@ -49,13 +52,15 @@ impl World {
                 }
             }
         }
-        World { width, height, cells, physics: Physics::default() }
+        let brush = vec![0; (width * height) as usize];
+        World { width, height, cells, brush, physics: Physics::default() }
     }
 
     /// Rebuilds a world from raw cell words, e.g. a GPU readback.
     pub fn from_words(width: i32, height: i32, words: Vec<u32>) -> World {
         assert_eq!(words.len(), WORDS * (width * height) as usize, "{width}x{height} lattice, {WORDS} words a cell");
-        World { width, height, cells: words, physics: Physics::default() }
+        let brush = vec![0; (width * height) as usize];
+        World { width, height, cells: words, brush, physics: Physics::default() }
     }
 
     pub fn width(&self) -> i32 {
@@ -185,9 +190,11 @@ impl World {
         true
     }
 
-    /// One phase for every cell, row by row. Any order gives the same result. Debug builds check
+    /// The brush's waiting offers settle (`settle`), then one phase for every cell, row by row. Any order gives the same result. Debug builds check
     /// the census after every step.
     pub fn step(&mut self) {
+        // The brush's waiting offers land between phases.
+        self.settle();
         #[cfg(debug_assertions)]
         let before = self.conserved();
         for y in 0..self.height {

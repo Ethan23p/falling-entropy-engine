@@ -86,8 +86,12 @@ impl Layout {
 }
 
 /// A lattice's extent in hexagon sizes (centre to corner): flat-topped hexes 1.5 apart across,
-/// √3 apart down, odd columns half a cell lower.
-pub fn extent(width: i32, height: i32) -> Vec2 {
+/// √3 apart down, odd columns half a cell lower. As square bricks (`bricks`), each cell is a
+/// square 2 across, in the same column-offset pattern: the same topology, drawn differently.
+pub fn extent(width: i32, height: i32, bricks: bool) -> Vec2 {
+    if bricks {
+        return Vec2::new(2.0 * width as f32, 2.0 * (height as f32 + 0.5));
+    }
     Vec2::new(1.5 * (width - 1).max(0) as f32 + 2.0, SQRT3 * (height as f32 + 0.5))
 }
 
@@ -102,14 +106,16 @@ pub struct Fit {
     pub origin: Vec2,
     /// Width and height on screen, in pixels.
     pub span: Vec2,
+    /// Cells drawn as square bricks rather than hexagons.
+    pub bricks: bool,
 }
 
 impl Fit {
     /// Fits a `width` x `height` lattice in `area`, centred, as large as fits but at most `scale`
     /// screen pixels per hexagon size (`None`: no limit). `hex_px` is the render resolution: virtual
     /// pixels across one hexagon, corner to corner; 0 draws at the screen's own resolution.
-    pub fn new(width: i32, height: i32, area: Rect, scale: Option<f32>, hex_px: f32) -> Fit {
-        let e = extent(width, height);
+    pub fn new(width: i32, height: i32, area: Rect, scale: Option<f32>, hex_px: f32, bricks: bool) -> Fit {
+        let e = extent(width, height, bricks);
         let mut s = (area.size / e).min_element().max(0.01);
         if let Some(limit) = scale {
             s = s.min(limit);
@@ -117,7 +123,7 @@ impl Fit {
         let span = e * s;
         let origin = (area.min + (area.size - span) * 0.5).floor();
         let (size, texel) = if hex_px > 0.0 { (hex_px * 0.5, s / (hex_px * 0.5)) } else { (s, 1.0) };
-        Fit { size, texel, origin, span }
+        Fit { size, texel, origin, span, bricks }
     }
 
     /// Screen pixels per hexagon size: what a toy case matches to the main lattice's cells.
@@ -133,6 +139,10 @@ impl Fit {
     pub fn cell_at(&self, p: Vec2) -> (i32, i32) {
         let v = ((p - self.origin) / self.texel).floor() + 0.5;
         let s = self.size;
+        if self.bricks {
+            let x = (v.x / (2.0 * s)).floor() as i32;
+            return (x, (v.y / (2.0 * s) - 0.5 * (x & 1) as f32).floor() as i32);
+        }
         let p = v - Vec2::new(s, 0.5 * SQRT3 * s);
         let (q, r) = round_axial(p.x * 2.0 / (3.0 * s), (-p.x / 3.0 + p.y * SQRT3 / 3.0) / s);
         sim::from_axial(q, r)
@@ -179,7 +189,7 @@ mod tests {
     #[test]
     fn view_lattice_is_centred_and_fits() {
         let area = Rect::new(Vec2::new(100.0, 50.0), Vec2::new(800.0, 600.0));
-        let f = Fit::new(128, 128, area, None, 0.0);
+        let f = Fit::new(128, 128, area, None, 0.0, false);
         let r = f.rect();
         assert!(r.min.cmpge(area.min).all() && r.max().cmple(area.max() + 1.0).all());
         assert!((r.center() - area.center()).abs().max_element() <= 1.0);
@@ -188,12 +198,17 @@ mod tests {
     #[test]
     fn view_cell_at_finds_each_cells_centre() {
         let area = Rect::new(Vec2::ZERO, Vec2::new(500.0, 500.0));
-        for hex_px in [0.0, 6.0, 20.0] {
-            let f = Fit::new(20, 20, area, None, hex_px);
+        for (hex_px, bricks) in [(0.0, false), (6.0, false), (20.0, false), (0.0, true), (6.0, true)] {
+            let f = Fit::new(20, 20, area, None, hex_px, bricks);
             for (x, y) in [(0, 0), (1, 0), (3, 7), (19, 19), (10, 4)] {
-                let centre = Vec2::new(1.5 * x as f32 + 1.0, SQRT3 * (y as f32 + 0.5 + 0.5 * (x & 1) as f32));
+                let down = y as f32 + 0.5 + 0.5 * (x & 1) as f32;
+                let centre = if bricks {
+                    Vec2::new(2.0 * x as f32 + 1.0, 2.0 * down)
+                } else {
+                    Vec2::new(1.5 * x as f32 + 1.0, SQRT3 * down)
+                };
                 let p = f.origin + centre * f.scale();
-                assert_eq!(f.cell_at(p), (x, y), "hex_px {hex_px}");
+                assert_eq!(f.cell_at(p), (x, y), "hex_px {hex_px} bricks {bricks}");
             }
         }
     }
@@ -201,8 +216,8 @@ mod tests {
     #[test]
     fn view_resolution_is_separate_from_screen_size() {
         let area = Rect::new(Vec2::ZERO, Vec2::new(900.0, 900.0));
-        let coarse = Fit::new(128, 128, area, None, 4.0);
-        let fine = Fit::new(128, 128, area, None, 24.0);
+        let coarse = Fit::new(128, 128, area, None, 4.0, false);
+        let fine = Fit::new(128, 128, area, None, 24.0, false);
         assert_eq!(coarse.span, fine.span, "same size on screen");
         assert!(coarse.texel > fine.texel, "fewer, larger pixels");
     }

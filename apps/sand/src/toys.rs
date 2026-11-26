@@ -32,6 +32,7 @@ const LABEL: f32 = 1.6;
 
 /// Where each toy's lattice draws (its fit) and its whole slot (lattice and label), in the strip
 /// `area`, scrolled by `scroll` pixels along it. `scale` is the main lattice's (see `Fit::scale`).
+#[allow(clippy::too_many_arguments)]
 pub fn arrange(
     toys: &[Toy],
     area: Rect,
@@ -39,6 +40,7 @@ pub fn arrange(
     s: Screen,
     scale: f32,
     hex_px: f32,
+    bricks: bool,
     scroll: f32,
 ) -> Vec<(Fit, Rect)> {
     let label = s.em(LABEL);
@@ -50,7 +52,7 @@ pub fn arrange(
             if !portrait {
                 // A column: each toy as wide as the strip allows, no taller than it is wide.
                 let room = Rect::new(Vec2::new(area.min.x, area.min.y + along), Vec2::splat(area.size.x));
-                let fit = Fit::new(w, h, room, Some(scale), hex_px);
+                let fit = Fit::new(w, h, room, Some(scale), hex_px, bricks);
                 let top = area.min.y + along;
                 let fit = Fit { origin: Vec2::new(fit.origin.x, top.floor()), ..fit };
                 let slot = Rect::new(Vec2::new(area.min.x, top), Vec2::new(area.size.x, fit.span.y + label));
@@ -60,7 +62,7 @@ pub fn arrange(
                 // A row: each toy as tall as the strip allows, less its label.
                 let tall = area.size.y - label;
                 let room = Rect::new(Vec2::new(area.min.x + along, area.min.y), Vec2::new(tall * 1.6, tall));
-                let fit = Fit::new(w, h, room, Some(scale), hex_px);
+                let fit = Fit::new(w, h, room, Some(scale), hex_px, bricks);
                 let left = area.min.x + along;
                 let wide = fit.span.x.max(s.em(5.0));
                 let origin = Vec2::new((left + (wide - fit.span.x) * 0.5).floor(), fit.origin.y);

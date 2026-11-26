@@ -68,6 +68,7 @@ impl Stamp {
 pub struct Pipelines {
     step: wgpu::ComputePipeline,
     brush: wgpu::ComputePipeline,
+    settle: wgpu::ComputePipeline,
     render: wgpu::RenderPipeline,
 }
 
@@ -112,7 +113,7 @@ impl Pipelines {
             multiview_mask: None,
             cache: None,
         });
-        Self { step: compute("step"), brush: compute("brush"), render }
+        Self { step: compute("step"), brush: compute("brush"), settle: compute("settle"), render }
     }
 }
 
@@ -126,8 +127,12 @@ pub struct Lattice {
     params: wgpu::Buffer,
     stamps: wgpu::Buffer,
     view: wgpu::Buffer,
+    /// The brush's offers waiting on each cell (`World::brush`).
+    #[allow(dead_code)]
+    offers: wgpu::Buffer,
     step_group: wgpu::BindGroup,
     brush_group: wgpu::BindGroup,
+    settle_group: wgpu::BindGroup,
     render_group: wgpu::BindGroup,
 }
 
@@ -165,6 +170,14 @@ impl Lattice {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let offers = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brush offers"),
+            size: (width * height * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: true,
+        });
+        // Mapped at creation, so it starts zeroed: no offers waiting.
+        offers.unmap();
         let group = |label, layout: wgpu::BindGroupLayout, entries: &[(u32, &wgpu::Buffer)]| {
             let entries: Vec<_> = entries
                 .iter()
@@ -178,9 +191,11 @@ impl Lattice {
         };
         let step_group = group("step", pipelines.step.get_bind_group_layout(0), &[(0, &params), (1, &cells)]);
         let brush_group =
-            group("brush", pipelines.brush.get_bind_group_layout(0), &[(0, &params), (1, &cells), (2, &stamps)]);
+            group("brush", pipelines.brush.get_bind_group_layout(0), &[(0, &params), (2, &stamps), (3, &offers)]);
+        let settle_group =
+            group("settle", pipelines.settle.get_bind_group_layout(0), &[(0, &params), (1, &cells), (3, &offers)]);
         let render_group = group("render", pipelines.render.get_bind_group_layout(0), &[(0, &view), (1, &cells)]);
-        Self { width, height, cells, params, stamps, view, step_group, brush_group, render_group }
+        Self { width, height, cells, params, stamps, view, offers, step_group, brush_group, settle_group, render_group }
     }
 
     fn groups(&self) -> (u32, u32) {
@@ -225,8 +240,16 @@ impl Lattice {
             pass.set_bind_group(0, &self.brush_group, &[]);
             pass.dispatch_workgroups(gx, gy, 1);
         }
-        // Each phase is its own pass, so the next one starts after every cell has advanced.
+        // Each phase is its own pass, so the next one starts after every cell has advanced; before
+        // it, the brush's waiting offers settle (`World::step`).
         for _ in 0..phases {
+            {
+                let mut pass = encoder
+                    .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("settle"), timestamp_writes: None });
+                pass.set_pipeline(&pipelines.settle);
+                pass.set_bind_group(0, &self.settle_group, &[]);
+                pass.dispatch_workgroups(gx, gy, 1);
+            }
             let mut pass = encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
             pass.set_pipeline(&pipelines.step);
@@ -254,7 +277,7 @@ impl Lattice {
             Some((t, m)) => (t.radius, m as u32, t.centres),
             None => (-1, 0, [(0, 0); 4]),
         };
-        data.extend(words(&[radius as u32, material, 0, 0, 0]));
+        data.extend(words(&[radius as u32, material, look.bricks as u32, 0, 0]));
         for (q, r) in centres {
             data.extend(words(&[q as u32, r as u32, 0, 0]));
         }
@@ -295,6 +318,8 @@ pub struct Look {
     pub origin: [f32; 2],
     /// How dark hex edges draw, 0 to 1.
     pub edges: f32,
+    /// Cells drawn as square bricks rather than hexagons.
+    pub bricks: bool,
     pub ghost: Option<(sim::Placed, sim::Material)>,
 }
 

@@ -29,7 +29,7 @@ pub mod selection;
 mod update;
 mod world;
 
-pub use brush::{Placed, Tetrahex};
+pub use brush::{BRUSH_WAIT, Placed, Tetrahex};
 pub use cell::State;
 pub use lattice::{Dir, from_axial, hex_distance, neighbor, to_axial};
 pub use particle::{Material, Velocity};

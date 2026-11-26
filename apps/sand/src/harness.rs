@@ -231,7 +231,7 @@ impl Renderer {
     fn render(&self, world: &sim::World, cell: u32) -> RgbaImage {
         // `cell` pixels across each hexagon, corner to corner.
         let size = cell as f32 * 0.5;
-        let span = crate::view::extent(world.width(), world.height()) * size;
+        let span = crate::view::extent(world.width(), world.height(), false) * size;
         let (width, height) = (span.x.ceil() as u32, span.y.ceil() as u32);
         let lattice = Lattice::new(&self.device, &self.pipelines, world);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -255,7 +255,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let look = Look { size, texel: 1.0, origin: [0.0, 0.0], edges: 0.22, ghost: None };
+        let look = Look { size, texel: 1.0, origin: [0.0, 0.0], edges: 0.22, bricks: false, ghost: None };
         let clear = Some(wgpu::Color { r: 0.031, g: 0.035, b: 0.047, a: 1.0 });
         lattice.render(&self.queue, &self.pipelines, &mut encoder, &view, &look, [0, 0, width, height], clear);
         encoder.copy_texture_to_buffer(
