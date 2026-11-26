@@ -7,7 +7,8 @@
 //!
 //! What it holds so far:
 //! - **Capacity** (evaluate's exclusion): a cell holds one particle at most, so a cell holding a
-//!   particle rejects every offer of one. A cell holding nothing can take one (`entertains`).
+//!   substantial particle rejects every offer of one. A cell holding nothing can take any particle,
+//!   and a cell holding air, which is insubstantial, a substantial one (`entertains`).
 //! - **Movement** (propose): a particle intends to move along its velocity. What might a cell holding
 //!   it offer to? Propose excludes the neighbors it wouldn't (`offers_to`) and weights the rest
 //!   by how well they line up with the velocity, by the particle's mass, and by how amenable it is
@@ -103,10 +104,12 @@ impl Physics {
     }
 
     /// Evaluate's exclusion, the capacity limit: whether a cell whose live state holds `holding`
-    /// entertains an offer of a particle of `offered`. Holding a particle, it rejects every offer of
-    /// one; holding nothing, it can take one.
+    /// entertains an offer of a particle of `offered`. Holding a substantial particle, it rejects
+    /// every offer of one. Holding nothing, it can take any particle. Holding air, which is
+    /// insubstantial, it can take a more substantial one, and the air ceases to exist.
     pub fn entertains(&self, offered: Material, holding: Material) -> bool {
-        offered.moves() && !holding.is_particle()
+        let room = !holding.is_particle() || (!holding.is_substantial() && offered.is_substantial());
+        offered.moves() && room
     }
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding

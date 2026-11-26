@@ -9,8 +9,12 @@
 //!
 //! | Condition | Effect on the origin | Effect on the target |
 //! |---|---|---|
-//! | Accepted | `Release`: holds nothing | `Receive`: holds the particle, with gravity's impulse |
+//! | Accepted | `Release`: holds nothing; or for air, `Spawn`: holds a new air | `Receive`: holds the particle, with gravity's impulse |
 //! | Rejected | `Deflect`: keeps the particle; its intent turns away from the target | none |
+//!
+//! Air and vacuum interact specially: a cell holding air offers it into vacuum (the only cell that
+//! takes air), and on acceptance transfers it and spawns itself a new air. Air is insubstantial,
+//! so this is no breach of conservation; the census counts only substantial particles.
 //!
 //! Which offers a target entertains at all is the physics distribution's to say
 //! (`Physics::entertains`), not the contract's. How much an effect does is the materials' data
@@ -26,7 +30,9 @@
 //! - A proposes it in its update at phase `p - 1`: A publishes `offer` (toward B) at `p`, and its
 //!   particle is committed.
 //! - B evaluates it in its update at `p`, and publishes its verdict at `p + 1`: `accept` naming A,
-//!   or a rejection, by not naming A. Meanwhile A, committed, neither evaluates nor proposes.
+//!   or a rejection, by not naming A. Meanwhile A, committed, proposes nothing new. It still
+//!   evaluates, and the capacity limit decides: a committed substantial particle fills the cell, but
+//!   committed air can be overwritten, and then A's offer finds its air gone and has no effect.
 //! - A resolves it in its update at `p + 1`, reading B's verdict. The offer is in A's kept-back
 //!   state then (the one it published at `p`).
 //!
@@ -55,6 +61,9 @@ pub enum Effect {
     None,
     /// The particle leaves: the cell holds nothing.
     Release,
+    /// The particle leaves, and the cell spawns itself a new particle of the same material: a fresh
+    /// one, intending down. Only for an insubstantial particle (air).
+    Spawn,
     /// The particle arrives from the origin `from`, having made a physical move: gravity's impulse
     /// is applied to its velocity. The cell's verdict names that origin.
     Receive { from: Dir, origin: State },
@@ -65,8 +74,8 @@ pub enum Effect {
 }
 
 impl Offer {
-    /// The offer a cell has out, if any: its particle is committed to it, so the cell neither
-    /// evaluates nor proposes until the offer resolves.
+    /// The offer a cell has out, if any: its particle is committed to it, so the cell proposes
+    /// nothing new until the offer resolves.
     pub fn of(me: State) -> Option<Offer> {
         me.offer.map(|toward| Offer { toward })
     }
@@ -81,7 +90,10 @@ impl Offer {
     /// published state, which the target reads; `bits` are the origin's random bits.
     pub fn terms(self, verdict: Verdict, origin: State, bits: u32) -> (Effect, Effect) {
         match verdict {
-            Verdict::Accepted => (Effect::Release, Effect::Receive { from: self.toward.opposite(), origin }),
+            Verdict::Accepted => {
+                let released = if origin.material.is_substantial() { Effect::Release } else { Effect::Spawn };
+                (released, Effect::Receive { from: self.toward.opposite(), origin })
+            }
             Verdict::Rejected => (Effect::Deflect { from: self.toward, bits }, Effect::None),
         }
     }
@@ -93,6 +105,7 @@ impl Effect {
         match self {
             Effect::None => {}
             Effect::Release => *live = State::VACUUM,
+            Effect::Spawn => *live = State::holding(live.material),
             Effect::Receive { from, origin } => {
                 live.material = origin.material;
                 live.velocity = physics.moved(origin.material, origin.velocity);

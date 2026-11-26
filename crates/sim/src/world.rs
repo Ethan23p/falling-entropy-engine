@@ -113,6 +113,12 @@ impl World {
         Material::ALL.map(|m| self.count(m))
     }
 
+    /// The census of what is conserved: the substantial particles, in `Material::ALL` order, with
+    /// zero for vacuum and air (air is insubstantial: it can cease to exist and spawn anew).
+    pub fn conserved(&self) -> [usize; 6] {
+        Material::ALL.map(|m| if m.is_substantial() { self.count(m) } else { 0 })
+    }
+
     /// Whether every cell is at the same phase, as after a whole `step`.
     pub fn uniform(&self) -> bool {
         let p = self.phase(0, 0);
@@ -167,13 +173,18 @@ impl World {
     /// the census after every step.
     pub fn step(&mut self) {
         #[cfg(debug_assertions)]
-        let before = self.census();
+        let before = self.conserved();
         for y in 0..self.height {
             for x in 0..self.width {
                 self.update(x, y);
             }
         }
         #[cfg(debug_assertions)]
-        assert_eq!(before, self.census(), "particles not conserved by a step at phase {}", self.phase(0, 0));
+        assert_eq!(
+            before,
+            self.conserved(),
+            "substantial particles not conserved by a step at phase {}",
+            self.phase(0, 0)
+        );
     }
 }

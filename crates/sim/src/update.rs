@@ -21,13 +21,12 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     // Read: `seen` is the neighbors' published state; the live state starts as my own, its
     // contracts cleared until the stages below write them again.
     let mut live = State { offer: None, accept: None, ..me };
-    // An offer I published this phase is being evaluated now; its particle stays committed.
+    // An offer I published this phase is being evaluated now; its particle stays committed, so I
+    // propose nothing new. I still evaluate: what I can take is the capacity limit's to say.
     let committed = Offer::of(me).is_some();
 
     resolve(&mut live, kept, &seen, x, y, phase, physics);
-    if !committed {
-        evaluate(&mut live, &seen, x, y, phase, physics);
-    }
+    evaluate(&mut live, &seen, x, y, phase, physics);
     evolve(&mut live);
     // Publish, then propose. They share one write: the word a cell writes at the end of its update
     // holds both its published state and the contracts it just proposed, and neighbors read them
@@ -44,6 +43,11 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
 fn resolve(live: &mut State, kept: State, seen: &[State; 6], x: i32, y: i32, phase: u32, physics: &Physics) {
     let Some(offer) = Offer::of(kept) else { return };
     let verdict = offer.verdict(seen[offer.toward as usize]);
+    // The terms absorb a change in context: if the particle I offered is no longer here (air,
+    // overwritten while its offer was out), the offer has no effect on me.
+    if live.material != kept.material {
+        return;
+    }
     let (mine, _) = offer.terms(verdict, kept, hash(x, y, phase, SALT_DEFLECT));
     mine.apply(live, physics);
 }

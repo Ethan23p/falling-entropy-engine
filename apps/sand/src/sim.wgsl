@@ -155,7 +155,7 @@ fn holding(m: u32) -> State {
     return State(m, v, 0u, 0u);
 }
 
-// Particle (`particle`): `Material::is_particle`, `is_static`, `moves`.
+// Particle (`particle`): `Material::is_particle`, `is_substantial`, `is_static`, `moves`.
 
 fn is_particle(m: u32) -> bool {
     return m != VACUUM;
@@ -163,6 +163,11 @@ fn is_particle(m: u32) -> bool {
 
 fn is_static(m: u32) -> bool {
     return m == SLATE || m == BEDROCK;
+}
+
+// Air is insubstantial: not conserved, and a more substantial particle may transfer into it.
+fn is_substantial(m: u32) -> bool {
+    return is_particle(m) && m != AIR;
 }
 
 fn moves(m: u32) -> bool {
@@ -208,10 +213,12 @@ fn offers_to(m: u32, v: vec2<i32>, d: u32, dest: u32) -> bool {
     return moves(m) && amenable && along(v, d) > 0;
 }
 
-// `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a particle rejects
-// every offer of one; holding nothing, it can take one.
+// `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a substantial
+// particle rejects every offer of one; holding nothing, it can take any; holding air, a substantial
+// one, and the air ceases to exist.
 fn entertains(offered: u32, dest: u32) -> bool {
-    return moves(offered) && !is_particle(dest);
+    let room = !is_particle(dest) || (!is_substantial(dest) && is_substantial(offered));
+    return moves(offered) && room;
 }
 
 // `Physics::weight`.
@@ -227,8 +234,9 @@ fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
 }
 
 // Contract (`contract`): an offer's terms pair each condition (the verdict) with an effect on each
-// end. Accepted: the origin releases, the target receives. Rejected: the origin deflects, the
-// target does nothing.
+// end. Accepted: the origin releases (air spawns a new air), the target receives. Rejected: the
+// origin deflects, the target does nothing. An offer whose particle is gone (air overwritten while
+// it was out) has no effect on its origin.
 
 // `Offer::verdict`: an offer toward d is accepted if the target's verdict names this cell.
 fn accepted(d: u32, dest: State) -> bool {
@@ -238,6 +246,11 @@ fn accepted(d: u32, dest: State) -> bool {
 // `Effect::Release`: the particle leaves; the cell holds nothing.
 fn release(live: ptr<function, State>) {
     *live = holding(VACUUM);
+}
+
+// `Effect::Spawn`: the air leaves, and the cell spawns itself a fresh one.
+fn spawn(live: ptr<function, State>) {
+    *live = holding((*live).material);
 }
 
 // `Effect::Receive`: the particle arrives from the origin toward d, with gravity's impulse, and the
@@ -297,10 +310,14 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     let committed = me.offer != 0u;
 
     // Resolve: the offer kept back has its verdict now; apply the contract's effect on its origin.
-    if kept.offer != 0u {
+    if kept.offer != 0u && live.material == kept.material {
         let d = kept.offer - 1u;
         if accepted(d, (*seen)[d]) {
-            release(&live);
+            if is_substantial(kept.material) {
+                release(&live);
+            } else {
+                spawn(&live);
+            }
         } else {
             deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
         }
@@ -308,8 +325,9 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
 
     // Evaluate: the offers that target me, excluded unless the physics distribution entertains them,
     // the rest weighted; the one selected is accepted. Holding one particle at most, I then exclude
-    // the rest, which are rejected by not being named.
-    if !committed {
+    // the rest, which are rejected by not being named. A committed cell evaluates too: committed air
+    // can still be overwritten.
+    {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
             let origin = (*seen)[d];

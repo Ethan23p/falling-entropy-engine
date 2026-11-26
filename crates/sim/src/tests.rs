@@ -163,8 +163,8 @@ fn synchrony_a_ragged_front_of_phases_gives_the_same_world() {
 
 #[test]
 fn conservation_the_census_never_changes() {
-    // Contracts never create or lose a particle. Every count holds, measured on published state with
-    // each particle in transport counted once.
+    // Contracts never create or lose a substantial particle. Every count holds, measured on published
+    // state with each particle in transport counted once. (Air is insubstantial and not conserved.)
     let mut w = scattered(20, 16);
     for i in 0..12 {
         w.paint(3 + i, 4, Material::Air);
@@ -172,10 +172,10 @@ fn conservation_the_census_never_changes() {
         w.paint(3 + i, 14, Material::Water);
     }
     w.paint(10, 13, Material::Slate);
-    let census = w.census();
+    let census = w.conserved();
     for _ in 0..300 {
         w.step();
-        assert_eq!(w.census(), census, "{}", w.ascii());
+        assert_eq!(w.conserved(), census, "{}", w.ascii());
     }
 }
 
@@ -458,22 +458,63 @@ fn evaluate_sand_rejects_every_offer() {
 }
 
 #[test]
-fn evaluate_air_and_water_reject_every_offer() {
-    // Nothing is overwritten: a cell holding a particle has no capacity for another.
+fn evaluate_water_rejects_every_offer() {
+    // A cell holding a substantial particle has no capacity for another.
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
-    for m in [Material::Air, Material::Water] {
-        let s = next(State::holding(m), State::AIR, seen, 2, 2, 0, &Physics::default());
-        assert_eq!((s.material, s.accept), (m, None));
+    let s = next(State::holding(Material::Water), State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Water, None));
+}
+
+#[test]
+fn evaluate_air_gives_way_to_sand_but_not_to_air() {
+    // Air is insubstantial: sand transfers in and the air ceases to exist. Air can't take air.
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(State::AIR, State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
+    let seen = around(&[(Dir::Up, State { offer: Some(Dir::Down), ..State::AIR })]);
+    let s = next(State::AIR, State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Air, None));
+}
+
+#[test]
+fn evaluate_air_with_its_offer_out_still_gives_way_to_sand() {
+    // Capacity alone decides what evaluate entertains: committed air is still insubstantial.
+    let me = State { offer: Some(Dir::DownLeft), ..State::AIR };
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(me, State::AIR, seen, 2, 2, 1, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
+}
+
+#[test]
+fn resolve_an_offer_of_air_that_was_overwritten_has_no_effect() {
+    // The contract's conditions absorb the change: the air I offered is gone, sand is here now.
+    let kept = State { offer: Some(Dir::Down), ..State::AIR };
+    let me = State { accept: Some(Dir::Up), ..sand(DOWN) };
+    for accept in [Some(Dir::Up), None] {
+        let seen = around(&[(Dir::Down, State { accept, ..State::AIR })]);
+        let s = next(me, kept, seen, 2, 2, 0, &Physics::default());
+        assert_eq!((s.material, s.velocity), (Material::Sand, DOWN));
     }
 }
 
 #[test]
+fn resolve_accepted_air_spawns_a_new_air() {
+    // Air offered into vacuum, accepted: it transfers, and the origin spawns itself a fresh air.
+    let kept = State { offer: Some(Dir::Down), velocity: Velocity { x: 100, y: 256 }, ..State::AIR };
+    let seen = around(&[(Dir::Down, State { accept: Some(Dir::Up), ..State::AIR })]);
+    let s = next(State { offer: None, ..kept }, kept, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.velocity), (Material::Air, DOWN));
+}
+
+#[test]
 fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
-    // The capacity limit: one particle per cell. Only a cell holding nothing entertains an offer.
+    // The capacity limit: one particle per cell. A cell holding nothing entertains any offer; one
+    // holding air, which is insubstantial, an offer of a substantial particle; any other, none.
     let p = Physics::default();
     for holding in Material::ALL {
         for offered in [Material::Air, Material::Water, Material::Sand] {
-            assert_eq!(p.entertains(offered, holding), holding == Material::Vacuum, "{offered:?} into {holding:?}");
+            let room = holding == Material::Vacuum || (holding == Material::Air && offered != Material::Air);
+            assert_eq!(p.entertains(offered, holding), room, "{offered:?} into {holding:?}");
         }
     }
 }
@@ -529,6 +570,9 @@ fn contract_terms_pair_each_verdict_with_an_effect_on_each_end() {
     let offer = Offer { toward: Dir::Down };
     let origin = offering(Dir::Down, DOWN);
     assert_eq!(offer.terms(Verdict::Accepted, origin, 7), (Effect::Release, Effect::Receive { from: Dir::Up, origin }));
+    // Air is insubstantial: accepted, its origin spawns a new one.
+    let air = State { offer: Some(Dir::Down), ..State::AIR };
+    assert_eq!(offer.terms(Verdict::Accepted, air, 7), (Effect::Spawn, Effect::Receive { from: Dir::Up, origin: air }));
     assert_eq!(offer.terms(Verdict::Rejected, origin, 7), (Effect::Deflect { from: Dir::Down, bits: 7 }, Effect::None));
     // The origin reads the verdict from the target: accepted only when the target names it.
     assert_eq!(offer.verdict(State { accept: Some(Dir::Up), ..State::AIR }), Verdict::Accepted);
@@ -629,26 +673,28 @@ fn materials(w: &World) -> Vec<Material> {
 }
 
 #[test]
-fn movement_a_packed_lattice_is_still() {
-    // Every cell holds a particle and nothing is overwritten: there is nowhere to move.
+fn movement_sand_settles_through_a_packed_lattice_of_air() {
+    // Air is insubstantial, so sand transfers into it: the sand sinks and the air ends up on top.
     let mut w = packed(12, 12);
-    let start = materials(&w);
-    for _ in 0..200 {
+    let (before, sand) = (mean_row(&w, Material::Sand), w.count(Material::Sand));
+    for _ in 0..3000 {
         w.step();
-        assert_eq!(materials(&w), start, "{}", w.ascii());
     }
+    assert!(mean_row(&w, Material::Sand) > before + 2.5, "{}", w.ascii());
+    assert!((0..4).all(|y| (0..12).all(|x| w.material(x, y) == Material::Air)), "{}", w.ascii());
+    assert_eq!(w.count(Material::Sand), sand);
 }
 
 #[test]
-fn movement_one_vacuum_cell_gets_a_packed_lattice_moving() {
-    let mut w = packed(12, 12);
+fn movement_air_fills_a_vacuum_cell_and_leaves_none_behind() {
+    // A lattice of air with one cell of vacuum: air above offers into it, and spawns itself anew.
+    let mut w = World::new(12, 12);
+    w.stamp(6.0, 6.0, 20.0, Material::Air);
     w.paint(6, 6, Material::Vacuum);
-    let start = materials(&w);
     for _ in 0..20 {
         w.step();
     }
-    assert_ne!(materials(&w), start, "{}", w.ascii());
-    assert_eq!(w.count(Material::Vacuum), 1);
+    assert_eq!(w.count(Material::Vacuum), 0, "{}", w.ascii());
 }
 
 #[test]
@@ -759,16 +805,16 @@ fn movement_sand_rests_on_water_and_water_never_climbs() {
 }
 
 #[test]
-fn movement_air_is_a_very_light_particle_and_falls_in_vacuum() {
-    // All particles feel gravity: a cloud of air in empty space settles to the floor.
+fn movement_air_spreads_to_fill_vacuum() {
+    // A cloud of air in empty space: each air offered into vacuum and accepted spawns a new one, so
+    // the air fills the space, from the floor up.
     let mut w = World::new(16, 16);
     w.stamp(8.0, 4.0, 3.0, Material::Air);
-    let (before, cells) = (mean_row(&w, Material::Air), w.count(Material::Air));
     for _ in 0..600 {
         w.step();
     }
-    assert!(mean_row(&w, Material::Air) > before + 8.0, "{}", w.ascii());
-    assert_eq!(w.count(Material::Air), cells);
+    assert!(w.count(Material::Vacuum) <= 8, "{}", w.ascii());
+    assert!((8..16).all(|y| (0..16).all(|x| w.material(x, y) == Material::Air)), "{}", w.ascii());
 }
 
 #[test]

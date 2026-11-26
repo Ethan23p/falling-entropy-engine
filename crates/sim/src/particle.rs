@@ -2,17 +2,20 @@
 //!
 //! A particle is an individual physics body: a material and a velocity. It is located relative to
 //! the cell that holds it (one particle per cell, at most, for now), so it has no position of its
-//! own. A material's properties are intrinsic constants: its mass (a tunable of the physics
-//! distribution, `Physics::mass`) and whether it is static.
+//! own. A material's properties are intrinsic constants: its mass and the like (tunables of the
+//! physics distribution, `physics::Properties`), whether it is static, and whether it is
+//! substantial.
 
 /// What a cell holds. The discriminants are the encoded values, shared with the shaders.
 ///
 /// Vacuum is listed with the materials because a cell has to say what it holds even when that is
-/// nothing: vacuum is nothing, no particle and no mass. Air is a particle, of very low mass.
+/// nothing: vacuum is nothing, no particle and no mass. Air is a particle, of very low mass, and
+/// insubstantial.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Material {
-    /// A particle of very low mass.
+    /// A particle of very low mass, and insubstantial: a more substantial particle may transfer into
+    /// a cell holding air, and the air ceases to exist.
     Air = 0,
     /// A particle of mid mass.
     Sand = 1,
@@ -34,6 +37,12 @@ impl Material {
     /// Whether this is a particle at all: anything but vacuum.
     pub const fn is_particle(self) -> bool {
         !matches!(self, Material::Vacuum)
+    }
+
+    /// Whether this is a substantial particle: anything but vacuum and air. Air is insubstantial, so
+    /// it isn't conserved: it can cease to exist, and spawn anew (see `contract`).
+    pub const fn is_substantial(self) -> bool {
+        self.is_particle() && !matches!(self, Material::Air)
     }
 
     /// The material property `static`: slate and bedrock never move.

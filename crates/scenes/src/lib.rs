@@ -402,9 +402,9 @@ mod tests {
         for scene in ALL {
             let mut run = run::Run::new(scene, 48, 36);
             for _ in 0..400 {
-                let before = run.world.census();
+                let before = run.world.conserved();
                 let painted = run.step();
-                assert!(painted || run.world.census() == before, "{}", scene.name);
+                assert!(painted || run.world.conserved() == before, "{}", scene.name);
             }
         }
     }
