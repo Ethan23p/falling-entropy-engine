@@ -38,8 +38,8 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     live
 }
 
-/// Whether a cell may offer at this phase: every other phase, offset by a bit of its position's
-/// hash, so neighbors don't all offer at once.
+/// Whether a cell may offer at this phase: a bit of the hash of its position and phase, so
+/// neighbors don't all offer at once.
 pub fn offers_now(x: i32, y: i32, phase: u32) -> bool {
     hash(x, y, phase, SALT_OFFSET) & 1 == 0
 }
