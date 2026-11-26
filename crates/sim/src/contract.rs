@@ -30,9 +30,9 @@
 //! - A proposes it in its update at phase `p - 1`: A publishes `offer` (toward B) at `p`, and its
 //!   particle is committed.
 //! - B evaluates it in its update at `p`, and publishes its verdict at `p + 1`: `accept` naming A,
-//!   or `reject` naming A. Every offer B evaluates gets one or the other. Meanwhile A, committed, proposes nothing new. It still
-//!   evaluates, and the capacity limit decides: a committed substantial particle fills the cell, but
-//!   committed air can be overwritten, and then A's offer finds its air gone and has no effect.
+//!   or `reject` naming A. Every offer B evaluates gets one or the other. Meanwhile A, its particle
+//!   tied up in the offer and its capacity with it, proposes nothing new, and rejects every offer
+//!   into it.
 //! - A resolves it in its update at `p + 1`, reading B's verdict. The offer is in A's kept-back
 //!   state then (the one it published at `p`).
 //!

@@ -225,8 +225,8 @@ fn air_meets_vacuum(m: u32, seen: ptr<function, array<State, 6>>) -> bool {
 // `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a substantial
 // particle rejects every offer of one; holding nothing, it can take any; holding air, a substantial
 // one, and the air ceases to exist.
-fn entertains(offered: u32, dest: u32) -> bool {
-    let room = !is_particle(dest) || (!is_substantial(dest) && is_substantial(offered));
+fn entertains(offered: u32, dest: u32, committed: bool) -> bool {
+    let room = !is_particle(dest) || (!is_substantial(dest) && is_substantial(offered) && !committed);
     return moves(offered) && room;
 }
 
@@ -383,24 +383,20 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // its origin. With none yet, it stands: publish it again.
     if kept.offer != 0u {
         let d = kept.offer - 1u;
-        // The conditions absorb a change in context: offered air that ceased to exist meanwhile
-        // leaves the terms without effect on me.
-        let here = live.material == kept.material;
-        if accepted(d, (*seen)[d]) && here {
+        if accepted(d, (*seen)[d]) {
             if is_substantial(kept.material) {
                 release(&live);
             } else {
                 spawn(&live);
             }
-        } else if accepted(d, (*seen)[d]) {
-        } else if rejected(d, (*seen)[d]) && here {
+        } else if rejected(d, (*seen)[d]) {
             deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
-        } else if !rejected(d, (*seen)[d]) {
+        } else {
             live.offer = kept.offer;
             standing = true;
         }
     }
-    // An offer out, or standing, ties up my particle.
+    // An offer out, or standing, ties up my particle and with it my capacity.
     let committed = me.offer != 0u || standing;
 
     // Evaluate: the offers that target me, excluded unless the physics distribution entertains them,
@@ -413,7 +409,7 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
             let origin = (*seen)[d];
             if origin.offer == opposite(d) + 1u {
                 offered |= 1u << d;
-                if entertains(origin.material, live.material) {
+                if entertains(origin.material, live.material, committed) {
                     weights[d] = max(weight(origin.material, origin.velocity, opposite(d), live.material), 1u);
                 }
             }

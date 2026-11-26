@@ -484,26 +484,13 @@ fn evaluate_air_gives_way_to_sand_but_not_to_air() {
 }
 
 #[test]
-fn evaluate_air_with_its_offer_out_still_accepts_sand() {
-    // Air is insubstantial: with its own offer out, it still accepts exactly one offer of sand.
+fn evaluate_air_tied_up_in_its_own_offer_rejects_sand() {
+    // Its air is in another castle: with its own offer out, its capacity is tied up, so it rejects
+    // the sand, explicitly.
     let me = State { offer: Some(Dir::DownLeft), ..State::AIR };
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(me, State::AIR, seen, 2, 2, 1, &Physics::default());
-    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
-}
-
-#[test]
-fn resolve_an_offer_of_air_that_ceased_to_exist_has_no_effect() {
-    // The contract's conditions absorb the change: the air I offered is gone, sand is here now, and
-    // whatever the verdict, the air's terms leave the sand as it is.
-    let kept = State { offer: Some(Dir::Down), ..State::AIR };
-    let v = Velocity { x: 100, y: 500 };
-    let me = State { accept: Some(Dir::Up), ..sand(v) };
-    for (accept, reject) in [(Some(Dir::Up), 0), (None, 1 << Dir::Up as u8)] {
-        let seen = around(&[(Dir::Down, State { accept, reject, ..State::AIR })]);
-        let s = next(me, kept, seen, 2, 2, 0, &Physics::default());
-        assert_eq!((s.material, s.velocity), (Material::Sand, v));
-    }
+    assert_eq!((s.material, s.accept, s.rejected(Dir::Up)), (Material::Air, None, true));
 }
 
 #[test]
@@ -533,7 +520,7 @@ fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
     for holding in Material::ALL {
         for offered in [Material::Air, Material::Water, Material::Sand] {
             let room = holding == Material::Vacuum || (holding == Material::Air && offered != Material::Air);
-            assert_eq!(p.entertains(offered, holding), room, "{offered:?} into {holding:?}");
+            assert_eq!(p.entertains(offered, holding, false), room, "{offered:?} into {holding:?}");
         }
     }
 }

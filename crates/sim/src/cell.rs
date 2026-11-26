@@ -19,7 +19,7 @@ pub struct State {
     pub offer: Option<Dir>,
     pub accept: Option<Dir>,
     pub reject: u8,
-    /// Set only on initialization, by a coin flip: the cell lets its first phase pass before it
+    /// Set only on initialization, on every other row: the cell lets its first phase pass before it
     /// offers, so cells don't all offer in step.
     pub waits: bool,
 }
