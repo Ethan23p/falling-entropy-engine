@@ -7,13 +7,26 @@
 //!
 //! What it holds so far:
 //! - **Capacity** (evaluate's exclusion): a cell holds one particle at most, so a cell holding a
-//!   particle rejects every offer of one. A cell holding nothing can take one (`entertains`).
-//! - **Movement** (propose): a particle intends to move along its velocity. What might a cell holding
-//!   it offer to? Propose excludes the neighbors it wouldn't (`offers_to`) and weights the rest
-//!   by how well they line up with the velocity, by the particle's mass, and by how amenable it is
-//!   to what the neighbor holds (`weight`).
+//!   substantial particle rejects every offer of one. A cell holding nothing can take any particle,
+//!   and a cell holding air, which is insubstantial, a substantial one, unless its capacity is tied
+//!   up in an offer or a request of its own (`entertains`).
+//! - **Movement** (propose): a particle intends to move along its velocity. Which neighbors are
+//!   incompatible with it? Only the physically impossible: nothing, or a static particle, offers,
+//!   and nothing offers into a static particle (`offers_to`). Which does it most prefer? Weights
+//!   follow how well a move lines up with the velocity, halving with the turn from it as many times
+//!   as the particle's mass and its velocity's magnitude say (a heavy, fast particle all but never
+//!   offers backward), times its mass, and how amenable it is to what the neighbor holds (`weight`).
+//! - **Velocity** is a vector: a direction and a magnitude. Impulses add to it, and its magnitude
+//!   approaches the `ceiling` asymptotically, so a particle intending east hard holds that through
+//!   one impulse south and turns south through many (`impelled`).
+//! - **Air and vacuum**: when a cell holding air shares a neighborhood with a cell holding vacuum,
+//!   the air offers into the vacuum (`air_meets_vacuum`). On acceptance it spawns itself a new air
+//!   (`contract`).
+//! - **Requests** (propose): a cell proposes a request instead of an offer by chance, one phase in
+//!   `request_odds`. It asks a neighbor whose particle it has room for (`requests_from`), selected
+//!   by how strongly that particle's velocity points at it (`preference`).
 //! - **Gravity**: an impulse applied to a particle's velocity on each physical move, scaled by its
-//!   mass, turning it toward down (`moved`).
+//!   mass (`moved`).
 
 use crate::{Dir, Material, Velocity};
 
@@ -37,6 +50,10 @@ pub struct Properties {
 pub struct Physics {
     /// Gravity's impulse per unit of mass, in velocity units (`Velocity::SCALE` is one cell per move).
     pub gravity: u32,
+    /// The magnitude a velocity approaches, asymptotically, as impulses add to it.
+    pub ceiling: u32,
+    /// The chance a cell proposes a request instead of an offer: one phase in this many (0: never).
+    pub request_odds: u32,
     /// Each material's properties, indexed by its encoded value (`Material as usize`).
     pub materials: [Properties; 6],
 }
@@ -48,19 +65,23 @@ impl Default for Physics {
         // Mass: air very low, water low, sand mid, slate high, bedrock very high, vacuum none.
         set(Material::Vacuum, 0, 16, 0);
         set(Material::Air, 1, 16, 64);
-        set(Material::Water, 2, 8, 32);
+        set(Material::Water, 2, 8, 128);
         set(Material::Sand, 4, 1, 2);
         set(Material::Slate, 8, 0, 0);
         set(Material::Bedrock, 16, 0, 0);
-        Physics { gravity: 64, materials }
+        Physics { gravity: 64, ceiling: 1024, request_odds: 6, materials }
     }
 }
 
 /// The largest an `into` or a mass counts for, so six weights sum within a `u32`.
 const INTO_CAP: u32 = 255;
 const MASS_CAP: u32 = 16;
-/// The largest `along` counts for: a steady-scale velocity reaches at most 3 * `SCALE`.
-const ALONG_CAP: u32 = 1 << 10;
+/// The heaviest a direction weight can be: a move straight along the velocity.
+const WEIGHT_TOP: u32 = 1 << 16;
+/// How many halvings of the weight count at most: past it, a move weighs nothing.
+const HALVINGS_CAP: u32 = 16;
+/// The largest the ceiling counts for.
+const CEILING_CAP: u32 = 1 << 13;
 /// The largest a deflection counts for.
 const DEFLECT_CAP: u32 = 1 << 10;
 
@@ -88,39 +109,109 @@ impl Physics {
         self.of(m).deflect.min(DEFLECT_CAP)
     }
 
-    /// Propose's exclusion: what might a cell holding a particle of `m`, intending `velocity`, offer
-    /// to? The neighbor toward `d`, whose published state holds `target`, when all of these hold:
-    /// - the particle moves: nothing, or a static particle, offers nothing;
-    /// - the neighbor holds nothing, or a particle that moves and that this one is amenable to
-    ///   (`into` above zero), since that neighbor may have changed by the time it evaluates;
-    /// - the neighbor lies ahead of the particle's intent: within 90° of its velocity.
-    ///
-    /// Provisional: the last is a hard limit, the same for every material. The doc has a backward
-    /// move only unlikely, and an air particle more permissive with its direction than a hunk.
-    pub fn offers_to(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> bool {
-        let amenable = !target.is_particle() || (target.moves() && self.into(target) > 0);
-        m.moves() && amenable && velocity.along(d) > 0
+    /// Propose's exclusion: which neighbors are incompatible with a particle of `m`? Only the
+    /// physically impossible offers: a particle that doesn't move (static, or nothing at all) offers
+    /// nothing, and nothing offers into a static particle. A neighbor holding another particle that
+    /// moves stays compatible, since it may change its contents by the time it evaluates.
+    pub fn offers_to(&self, m: Material, target: Material) -> bool {
+        m.moves() && !target.is_static() && self.into(target) > 0
+    }
+
+    /// The air and vacuum interaction: whether a cell holding `m` offers only into the vacuum in its
+    /// neighborhood. True for air with a vacuum neighbor.
+    pub fn air_meets_vacuum(&self, m: Material, seen: &[crate::State; 6]) -> bool {
+        m == Material::Air && seen.iter().any(|s| s.material == Material::Vacuum)
+    }
+
+    /// Propose's exclusion for a request: a cell holding `holding` asks only for a particle of `m`
+    /// it has room for (`entertains`).
+    pub fn requests_from(&self, m: Material, holding: Material) -> bool {
+        self.entertains(m, holding, false)
+    }
+
+    /// Whether a cell proposes a request this phase rather than an offer, given its random `bits`.
+    pub fn requests(&self, bits: u32) -> bool {
+        self.request_odds != 0 && bits.is_multiple_of(self.request_odds)
     }
 
     /// Evaluate's exclusion, the capacity limit: whether a cell whose live state holds `holding`
-    /// entertains an offer of a particle of `offered`. Holding a particle, it rejects every offer of
-    /// one; holding nothing, it can take one.
-    pub fn entertains(&self, offered: Material, holding: Material) -> bool {
-        offered.moves() && !holding.is_particle()
+    /// entertains an offer of a particle of `offered`. Holding a substantial particle, it rejects
+    /// every offer of one. Holding nothing, it can take any particle. Holding air, which is
+    /// insubstantial, it can take a more substantial one, and the air ceases to exist. A cell that is
+    /// `committed`, tied up in an offer or a request of its own, has its capacity tied up too.
+    pub fn entertains(&self, offered: Material, holding: Material, committed: bool) -> bool {
+        let room = !holding.is_particle() || (!holding.is_substantial() && offered.is_substantial());
+        offered.moves() && room && !committed
     }
 
     /// The weight of moving a particle of `m` with `velocity` toward `d`, into a cell holding
-    /// `target`: growing as the square of how far the move points along the velocity, times the
-    /// particle's mass, times how amenable it is to what the target holds.
+    /// `target`: its preference for the move, times its mass, times how amenable it is to what the
+    /// target holds. The preference halves `mass * magnitude / SCALE` times per unit of turn from
+    /// the velocity, so straight ahead weighs most, and the heavier and faster the particle the
+    /// more firmly it holds to its velocity.
     pub fn weight(&self, m: Material, velocity: Velocity, d: Dir, target: Material) -> u32 {
-        let along = (velocity.along(d).max(0) as u32).min(ALONG_CAP);
-        self.into(target) * self.mass(m) * ((along * along) >> 8)
+        self.into(target) * self.mass(m) * self.preference(m, velocity, d)
     }
 
-    /// Gravity: the velocity of a particle of `m` that just moved, with gravity's impulse added,
-    /// then brought back to the steady scale.
+    /// How much a particle of `m` with `velocity` prefers moving toward `d`: `WEIGHT_TOP` straight
+    /// ahead, halving with the turn from the velocity, scaled by mass and magnitude.
+    pub fn preference(&self, m: Material, velocity: Velocity, d: Dir) -> u32 {
+        let (dx, dy) = d.step();
+        let (vx, vy) = (velocity.x as i32, velocity.y as i32);
+        let magnitude = isqrt((vx * vx + vy * vy) as u32);
+        let norm = isqrt(((vx * vx + vy * vy) * (dx * dx + dy * dy)) as u32) as i32;
+        // The turn, 1 - cosine, in 1/1024ths: 0 straight ahead, 2048 straight back.
+        let turn = if norm == 0 { 1024 } else { (1024 - velocity.along(d) * 1024 / norm).clamp(0, 2048) as u32 };
+        // Halvings, in 1/1024ths of one.
+        let halvings = (self.mass(m) * magnitude.min(CEILING_CAP) * turn) >> 8;
+        let whole = halvings >> 10;
+        if whole >= HALVINGS_CAP {
+            return 0;
+        }
+        let w = WEIGHT_TOP >> whole;
+        // Between whole halvings, a straight line from w down to w / 2.
+        w - ((w * (halvings & 1023)) >> 11)
+    }
+
+    /// Gravity: the velocity of a particle of `m` that just moved, with gravity's impulse added.
     pub fn moved(&self, m: Material, v: Velocity) -> Velocity {
         let impulse = (self.gravity.min(1 << 12) * self.mass(m)) as i32;
-        Velocity::steady(v.x as i32, v.y as i32 + impulse)
+        self.impelled(v, 0, impulse)
     }
+
+    /// The velocity `v` with the impulse `(ix, iy)` added. Where the impulse lengthens it, the gain
+    /// in magnitude is eased by how far it already is toward the ceiling, so magnitude approaches
+    /// the ceiling and never passes it; direction turns in full.
+    pub fn impelled(&self, v: Velocity, ix: i32, iy: i32) -> Velocity {
+        let c = self.ceiling.clamp(1, CEILING_CAP) as i32;
+        let cap = CEILING_CAP as i32;
+        let (ux, uy) = (v.x as i32 + ix.clamp(-cap, cap), v.y as i32 + iy.clamp(-cap, cap));
+        let before = (isqrt((v.x as i32 * v.x as i32 + v.y as i32 * v.y as i32) as u32) as i32).min(c);
+        let after = isqrt((ux * ux + uy * uy) as u32) as i32;
+        if after == 0 {
+            return Velocity::DOWN;
+        }
+        let eased = if after > before { before + (after - before) * (c - before) / c } else { after };
+        Velocity { x: (ux * eased / after) as i16, y: (uy * eased / after) as i16 }
+    }
+}
+
+/// The integer square root: the largest `r` with `r * r <= n`.
+pub fn isqrt(n: u32) -> u32 {
+    let mut r = 0u32;
+    let mut bit = 1u32 << 30;
+    let mut n = n;
+    while bit > n {
+        bit >>= 2;
+    }
+    while bit != 0 {
+        if n >= r + bit {
+            n -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    r
 }

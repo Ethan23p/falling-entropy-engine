@@ -3,12 +3,13 @@
 // identical; the GPU parity test checks them bit for bit.
 //
 // A cell keeps four words: per phase parity, a state word and a velocity word. Word 4i + (p & 1)
-// holds cell i's state at phase p (bits 0-18) and p itself (bits 19-31, wrapping); word
+// holds cell i's state at phase p (bits 0-19) and p itself (bits 20-31, wrapping); word
 // 4i + 2 + (p & 1) holds its velocity then. A neighbor at phase p reads those words, which the cell
 // doesn't overwrite until it reaches p + 2, so cells run in any order and in place.
 // A state (`State::encode`): what the cell holds in bits 0-2 (0 air, 1 sand, 2 bedrock,
 // 3 vacuum: nothing, 4 slate, 5 water), the offer in bits 3-5 and the acceptance in bits 6-8
-// (1 + a direction, or 0 for none). A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
+// (1 + a direction, or 0 for none), the rejections in bits 9-14 (one per direction), in bit 15 whether it waits (set
+// only on initialization), the request in bits 16-18 (as the offer), and in bit 19 whether it gives. A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
@@ -21,12 +22,16 @@ struct Properties {
 }
 
 // The lattice's size and the stamp count, then the physics distribution's data (`Physics`):
-// gravity, and each material's properties, indexed by its encoded value.
+// gravity, the velocity ceiling, the request odds, and each material's properties, indexed by its encoded value.
 struct Params {
     width: i32,
     height: i32,
     stamps: u32,
     gravity: u32,
+    ceiling: u32,
+    request_odds: u32,
+    _pad1: u32,
+    _pad2: u32,
     materials: array<Properties, 6>,
 }
 
@@ -43,9 +48,9 @@ struct Stamp {
 @group(0) @binding(1) var<storage, read_write> cells: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read> stamps: array<Stamp>;
 
-const STATE_BITS: u32 = 19u;
-const STATE_MASK: u32 = 0x7ffffu;
-const PHASE_MASK: u32 = 0x1fffu;
+const STATE_BITS: u32 = 20u;
+const STATE_MASK: u32 = 0xfffffu;
+const PHASE_MASK: u32 = 0xfffu;
 const AIR: u32 = 0u;
 const SAND: u32 = 1u;
 const BEDROCK: u32 = 2u;
@@ -55,9 +60,12 @@ const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
+const SALT_REQUEST: u32 = 5u;
 const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
-const ALONG_CAP: u32 = 1024u;
+const WEIGHT_TOP: u32 = 65536u;
+const HALVINGS_CAP: u32 = 16u;
+const CEILING_CAP: u32 = 8192u;
 const DEFLECT_CAP: u32 = 1024u;
 const SCALE: i32 = 256;
 
@@ -117,6 +125,12 @@ struct State {
     // 1 + a direction, or 0 for none.
     offer: u32,
     accept: u32,
+    // One bit per direction.
+    reject: u32,
+    waits: u32,
+    // 1 + a direction, or 0 for none.
+    request: u32,
+    gives: u32,
 }
 
 // `Material::decode`: the codes past water read as vacuum.
@@ -129,17 +143,22 @@ fn decode(bits: u32, v: u32) -> State {
     let velocity = vec2(bitcast<i32>(v << 16u) >> 16u, bitcast<i32>(v) >> 16u);
     var offer = (bits >> 3u) & 7u;
     var accept = (bits >> 6u) & 7u;
+    var request = (bits >> 16u) & 7u;
     if offer == 7u {
         offer = 0u;
     }
     if accept == 7u {
         accept = 0u;
     }
-    return State(material, velocity, offer, accept);
+    if request == 7u {
+        request = 0u;
+    }
+    return State(material, velocity, offer, accept, (bits >> 9u) & 63u, (bits >> 15u) & 1u, request, (bits >> 19u) & 1u);
 }
 
 fn encode(s: State) -> u32 {
-    return s.material | (s.offer << 3u) | (s.accept << 6u);
+    return s.material | (s.offer << 3u) | (s.accept << 6u) | ((s.reject & 63u) << 9u) | ((s.waits & 1u) << 15u)
+        | (s.request << 16u) | ((s.gives & 1u) << 19u);
 }
 
 fn encode_velocity(v: vec2<i32>) -> u32 {
@@ -152,10 +171,10 @@ fn holding(m: u32) -> State {
     if moves(m) {
         v = vec2(0, SCALE);
     }
-    return State(m, v, 0u, 0u);
+    return State(m, v, 0u, 0u, 0u, 0u, 0u, 0u);
 }
 
-// Particle (`particle`): `Material::is_particle`, `is_static`, `moves`.
+// Particle (`particle`): `Material::is_particle`, `is_substantial`, `is_static`, `moves`.
 
 fn is_particle(m: u32) -> bool {
     return m != VACUUM;
@@ -165,17 +184,13 @@ fn is_static(m: u32) -> bool {
     return m == SLATE || m == BEDROCK;
 }
 
-fn moves(m: u32) -> bool {
-    return is_particle(m) && !is_static(m);
+// Air is insubstantial: not conserved, and a more substantial particle may transfer into it.
+fn is_substantial(m: u32) -> bool {
+    return is_particle(m) && m != AIR;
 }
 
-// `Velocity::steady`: the direction of v at the steady scale; down when it has none.
-fn steady(v: vec2<i32>) -> vec2<i32> {
-    let m = max(abs(v.x), abs(v.y));
-    if m == 0 {
-        return vec2(0, SCALE);
-    }
-    return vec2(v.x * SCALE / m, v.y * SCALE / m);
+fn moves(m: u32) -> bool {
+    return is_particle(m) && !is_static(m);
 }
 
 // `Velocity::along`.
@@ -200,44 +215,130 @@ fn deflection(m: u32) -> u32 {
     return min(params.materials[m].deflect, DEFLECT_CAP);
 }
 
-// `Physics::offers_to`, propose's exclusion: what might a cell holding a particle of m, intending
-// v, offer to? A neighbor toward d holding nothing, or a particle that moves and that m is amenable
-// to, lying ahead of the intent (provisional: within 90 degrees, a hard limit for every material).
-fn offers_to(m: u32, v: vec2<i32>, d: u32, dest: u32) -> bool {
-    let amenable = !is_particle(dest) || (moves(dest) && into(dest) > 0u);
-    return moves(m) && amenable && along(v, d) > 0;
+// `Physics::offers_to`, propose's exclusion: only the physically impossible. A particle that
+// doesn't move offers nothing, and nothing offers into a static particle.
+fn offers_to(m: u32, dest: u32) -> bool {
+    return moves(m) && !is_static(dest) && into(dest) > 0u;
 }
 
-// `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a particle rejects
-// every offer of one; holding nothing, it can take one.
-fn entertains(offered: u32, dest: u32) -> bool {
-    return moves(offered) && !is_particle(dest);
+// `Physics::air_meets_vacuum`: a cell holding air with vacuum in its neighborhood offers only into
+// the vacuum.
+fn air_meets_vacuum(m: u32, seen: ptr<function, array<State, 6>>) -> bool {
+    var found = false;
+    for (var d = 0u; d < 6u; d++) {
+        found = found || (*seen)[d].material == VACUUM;
+    }
+    return m == AIR && found;
+}
+
+// `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a substantial
+// particle rejects every offer of one; holding nothing, it can take any; holding air, a substantial
+// one, and the air ceases to exist. A committed cell's capacity is tied up.
+fn entertains(offered: u32, dest: u32, committed: bool) -> bool {
+    let room = !is_particle(dest) || (!is_substantial(dest) && is_substantial(offered));
+    return moves(offered) && room && !committed;
+}
+
+// `Physics::requests_from`: a request asks only for a particle the requester has room for.
+fn requests_from(m: u32, dest: u32) -> bool {
+    return entertains(m, dest, false);
+}
+
+// `Physics::requests`: whether a cell proposes a request this phase, one in request_odds.
+fn requests(bits: u32) -> bool {
+    return params.request_odds != 0u && bits % params.request_odds == 0u;
+}
+
+// `physics::isqrt`.
+fn isqrt(n0: u32) -> u32 {
+    var n = n0;
+    var r = 0u;
+    var bit = 1u << 30u;
+    while bit > n {
+        bit = bit >> 2u;
+    }
+    while bit != 0u {
+        if n >= r + bit {
+            n -= r + bit;
+            r = (r >> 1u) + bit;
+        } else {
+            r = r >> 1u;
+        }
+        bit = bit >> 2u;
+    }
+    return r;
+}
+
+// `Physics::preference`: halving with the turn from the velocity, as many times as mass and
+// magnitude say.
+fn preference(m: u32, v: vec2<i32>, d: u32) -> u32 {
+    let s = step_of(d);
+    let magnitude = isqrt(u32(v.x * v.x + v.y * v.y));
+    let norm = i32(isqrt(u32((v.x * v.x + v.y * v.y) * (s.x * s.x + s.y * s.y))));
+    var turn = 1024u;
+    if norm != 0 {
+        turn = u32(clamp(1024 - along(v, d) * 1024 / norm, 0, 2048));
+    }
+    let halvings = (mass(m) * min(magnitude, CEILING_CAP) * turn) >> 8u;
+    let whole = halvings >> 10u;
+    if whole >= HALVINGS_CAP {
+        return 0u;
+    }
+    let w = WEIGHT_TOP >> whole;
+    return w - ((w * (halvings & 1023u)) >> 11u);
 }
 
 // `Physics::weight`.
 fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
-    let a = min(u32(max(along(v, d), 0)), ALONG_CAP);
-    return into(dest) * mass(m) * ((a * a) >> 8u);
+    return into(dest) * mass(m) * preference(m, v, d);
 }
 
-// `Physics::moved`, gravity: its impulse, added on a move, then back to the steady scale.
+// `Physics::moved`, gravity: its impulse, added on a move.
 fn moved(m: u32, v: vec2<i32>) -> vec2<i32> {
     let impulse = i32(min(params.gravity, 4096u) * mass(m));
-    return steady(vec2(v.x, v.y + impulse));
+    return impelled(v, vec2(0, impulse));
+}
+
+// `Physics::impelled`: v with the impulse added, its gain in magnitude eased toward the ceiling.
+fn impelled(v: vec2<i32>, impulse: vec2<i32>) -> vec2<i32> {
+    let c = i32(clamp(params.ceiling, 1u, CEILING_CAP));
+    let cap = i32(CEILING_CAP);
+    let u = v + clamp(impulse, vec2(-cap), vec2(cap));
+    let before = min(i32(isqrt(u32(v.x * v.x + v.y * v.y))), c);
+    let after = i32(isqrt(u32(u.x * u.x + u.y * u.y)));
+    if after == 0 {
+        return vec2(0, SCALE);
+    }
+    var eased = after;
+    if after > before {
+        eased = before + (after - before) * (c - before) / c;
+    }
+    return vec2(u.x * eased / after, u.y * eased / after);
 }
 
 // Contract (`contract`): an offer's terms pair each condition (the verdict) with an effect on each
-// end. Accepted: the origin releases, the target receives. Rejected: the origin deflects, the
-// target does nothing.
+// end. Accepted: the origin releases (air spawns a new air), the target receives. Rejected: the
+// origin deflects, the target does nothing. A request's: accepted, the origin gives (then releases
+// when it resolves), the target takes; rejected, neither does anything.
 
-// `Offer::verdict`: an offer toward d is accepted if the target's verdict names this cell.
+// `Offer::verdict`: an offer toward d is accepted if the target's acceptance names this cell,
+// rejected if its rejections do.
 fn accepted(d: u32, dest: State) -> bool {
     return dest.accept == opposite(d) + 1u;
+}
+
+fn rejected(d: u32, dest: State) -> bool {
+    return ((dest.reject >> opposite(d)) & 1u) == 1u;
 }
 
 // `Effect::Release`: the particle leaves; the cell holds nothing.
 fn release(live: ptr<function, State>) {
     *live = holding(VACUUM);
+}
+
+// `Effect::Spawn`: the air leaves, and the cell spawns itself a fresh one.
+fn spawn(live: ptr<function, State>) {
+    *live = holding((*live).material);
 }
 
 // `Effect::Receive`: the particle arrives from the origin toward d, with gravity's impulse, and the
@@ -248,17 +349,37 @@ fn receive(live: ptr<function, State>, d: u32, origin: State) {
     (*live).accept = d + 1u;
 }
 
+// `Request::verdict`: a request toward d is accepted if the origin's acceptance names this cell
+// and it gives; rejected if its rejections do.
+fn given(d: u32, origin: State) -> bool {
+    return origin.accept == opposite(d) + 1u && origin.gives == 1u;
+}
+
+// `Effect::Give`: the cell accepts the request from the requester toward d; its particle is
+// committed to the transfer.
+fn give(live: ptr<function, State>, d: u32) {
+    (*live).accept = d + 1u;
+    (*live).gives = 1u;
+}
+
+// `Effect::Take`: the requested particle arrives, as the origin published it, with gravity's impulse.
+fn take(live: ptr<function, State>, origin: State) {
+    (*live).material = origin.material;
+    (*live).velocity = moved(origin.material, origin.velocity);
+}
+
 // `Effect::Deflect`: the particle stays, its intent turned away from the target toward d by its
 // material's deflection.
 fn deflect(live: ptr<function, State>, d: u32, bits: u32) {
-    (*live).velocity = deflected(i32(deflection((*live).material)), (*live).velocity, d, bits);
+    let v = (*live).velocity;
+    (*live).velocity = impelled(v, deflection_of(i32(deflection((*live).material)), v, d, bits));
 }
 
-// `contract::deflected`: v turned away from d by k, perpendicular to it, to the side it already
-// leans (or the side bits picks when dead on), then back to the steady scale.
-fn deflected(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
+// `contract::deflection`: the impulse on v rejected toward d, k perpendicular to d, to the side it
+// already leans (or the side bits picks when dead on).
+fn deflection_of(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
     if k == 0 {
-        return v;
+        return vec2(0, 0);
     }
     let s = step_of(d);
     let lean = -v.x * s.y + v.y * s.x;
@@ -266,7 +387,7 @@ fn deflected(k: i32, v: vec2<i32>, d: u32, bits: u32) -> vec2<i32> {
     if lean > 0 || (lean == 0 && (bits & 1u) == 1u) {
         side = 1;
     }
-    return steady(vec2(v.x - side * k * s.y / 2, v.y + side * k * s.x / 2));
+    return vec2(-side * k * s.y / 2, side * k * s.x / 2);
 }
 
 // Selection (`selection::select`): 1 + the index chosen, or 0 when every weight is zero.
@@ -294,49 +415,136 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     var live = me;
     live.offer = 0u;
     live.accept = 0u;
-    let committed = me.offer != 0u;
+    live.reject = 0u;
+    live.request = 0u;
+    live.gives = 0u;
+    var standing = false;
 
-    // Resolve: the offer kept back has its verdict now; apply the contract's effect on its origin.
+    // Resolve: a particle given to a requester leaves (air spawns a new air). The offer kept back,
+    // with its verdict if it has one: apply the contract's effect on its origin. The request kept
+    // back likewise on its target, unless matched by the origin's offer, which I accepted. With no
+    // verdict yet, a contract stands: publish it again.
+    if me.gives == 1u {
+        if is_substantial(me.material) {
+            release(&live);
+        } else {
+            spawn(&live);
+        }
+    }
     if kept.offer != 0u {
         let d = kept.offer - 1u;
         if accepted(d, (*seen)[d]) {
-            release(&live);
-        } else {
+            if is_substantial(kept.material) {
+                release(&live);
+            } else {
+                spawn(&live);
+            }
+        } else if rejected(d, (*seen)[d]) {
             deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
+        } else {
+            live.offer = kept.offer;
+            standing = true;
+        }
+    } else if kept.request != 0u && me.accept != kept.request {
+        let d = kept.request - 1u;
+        if given(d, (*seen)[d]) {
+            take(&live, (*seen)[d]);
+        } else if !rejected(d, (*seen)[d]) {
+            live.request = kept.request;
+            standing = true;
         }
     }
+    // An offer or a request out, or standing, ties up my particle or my capacity.
+    let committed = me.offer != 0u || me.request != 0u || standing;
 
-    // Evaluate: the offers that target me, excluded unless the physics distribution entertains them,
-    // the rest weighted; the one selected is accepted. Holding one particle at most, I then exclude
-    // the rest, which are rejected by not being named.
-    if !committed {
-        var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+    // Evaluate: the contracts that target me (offers into me, requests for my particle), excluded
+    // unless the physics distribution entertains them, the rest weighted; the one selected is
+    // accepted, tying up what it deals in. While contracts remain I select again, from those my
+    // resources still entertain. Every contract evaluated gets a verdict: accepted, or rejected. A
+    // matched pair is accepted automatically, first.
+    {
+        var asked = 0u;
         for (var d = 0u; d < 6u; d++) {
-            let origin = (*seen)[d];
-            if origin.offer == opposite(d) + 1u && entertains(origin.material, live.material) {
-                weights[d] = max(weight(origin.material, origin.velocity, opposite(d), live.material), 1u);
+            let other = (*seen)[d];
+            if other.offer == opposite(d) + 1u || (other.request == opposite(d) + 1u && me.offer != d + 1u) {
+                asked |= 1u << d;
             }
         }
-        let i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE));
-        if i != 0u {
-            receive(&live, i - 1u, (*seen)[i - 1u]);
+        var tied = committed;
+        var taken = 0u;
+        var next_pick = 0u;
+        if me.request != 0u {
+            let d = me.request - 1u;
+            let origin = (*seen)[d];
+            if origin.offer == opposite(d) + 1u && entertains(origin.material, live.material, false) {
+                next_pick = me.request;
+            }
         }
+        for (var round = 0u; round < 6u; round++) {
+            var i = next_pick;
+            next_pick = 0u;
+            if i == 0u {
+                var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+                for (var d = 0u; d < 6u; d++) {
+                    let other = (*seen)[d];
+                    if (((asked & ~taken) >> d) & 1u) == 0u {
+                        continue;
+                    }
+                    if other.offer == opposite(d) + 1u {
+                        if entertains(other.material, live.material, tied) {
+                            weights[d] = max(weight(other.material, other.velocity, opposite(d), live.material), 1u);
+                        }
+                    } else if !tied && entertains(live.material, other.material, false) {
+                        weights[d] = max(weight(live.material, live.velocity, d, other.material), 1u);
+                    }
+                }
+                i = select_from(&weights, hash(x, y, phase, SALT_EVALUATE | (round << 8u)));
+                if i == 0u {
+                    break;
+                }
+            }
+            let d = i - 1u;
+            taken |= 1u << d;
+            if (*seen)[d].offer == opposite(d) + 1u {
+                receive(&live, d, (*seen)[d]);
+            } else {
+                give(&live, d);
+            }
+            tied = true;
+        }
+        live.reject = asked & ~taken;
     }
 
     // Evolve: no natural contracts yet.
 
-    // Publish, then propose, in one write (see `update::next`).
-    // Propose: from the six neighbors, exclude those it wouldn't offer to, select among the rest,
-    // weighted.
-    if !committed {
+    // Publish, then propose, in one write (see `update::next`). A given particle proposes nothing.
+    // Propose: one phase in request_odds a request, from the neighbors whose particle I have room
+    // for, by how strongly its velocity points at me; otherwise an offer, from the six neighbors,
+    // excluding those it wouldn't offer to, weighted.
+    live.waits = 0u;
+    if !committed && me.waits == 0u && live.gives == 0u {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
-        for (var d = 0u; d < 6u; d++) {
-            let dest = (*seen)[d].material;
-            if offers_to(live.material, live.velocity, d, dest) {
-                weights[d] = weight(live.material, live.velocity, d, dest);
+        if requests(hash(x, y, phase, SALT_REQUEST)) {
+            for (var d = 0u; d < 6u; d++) {
+                let other = (*seen)[d];
+                if requests_from(other.material, live.material) {
+                    weights[d] = preference(other.material, other.velocity, opposite(d));
+                }
             }
+            live.request = select_from(&weights, hash(x, y, phase, SALT_PROPOSE));
+        } else {
+            let only_vacuum = air_meets_vacuum(live.material, seen);
+            for (var d = 0u; d < 6u; d++) {
+                let dest = (*seen)[d].material;
+                if only_vacuum && dest != VACUUM {
+                    continue;
+                }
+                if offers_to(live.material, dest) {
+                    weights[d] = weight(live.material, live.velocity, d, dest);
+                }
+            }
+            live.offer = select_from(&weights, hash(x, y, phase, SALT_PROPOSE));
         }
-        live.offer = select_from(&weights, hash(x, y, phase, SALT_PROPOSE));
     }
     return live;
 }
@@ -392,7 +600,7 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
 // The brush (`brush`, `World::paint`), between phases: a particle is spawned only into a cell holding
 // nothing; erasing
 // (vacuum) empties anything but bedrock; a painted particle intends to move down. Cells engaged in
-// a contract (an offer out, one awaiting its verdict, or a particle in transport) are left alone.
+// a contract (an offer or a request out, one awaiting its verdict, or a particle in transport) are left alone.
 // Stamps apply in order.
 @compute @workgroup_size(8, 8)
 fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -405,7 +613,7 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     let parity = current(i);
     let now = load_state(i, parity);
     let kept = load_state(i, 1 - parity);
-    if now.offer != 0u || now.accept != 0u || kept.offer != 0u {
+    if now.offer != 0u || now.request != 0u || now.accept != 0u || kept.offer != 0u || kept.request != 0u {
         return;
     }
     let centre = vec2(f32(x), f32(y) + 0.5 * f32(x & 1));
@@ -424,7 +632,9 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
     if painted {
-        let s = holding(here);
+        var s = holding(here);
+        // Painting keeps the cell's initialization (whether it waits).
+        s.waits = (word >> 15u) & 1u;
         atomicStore(&cells[4 * i + parity], encode(s) | (word & ~STATE_MASK));
         atomicStore(&cells[4 * i + 2 + parity], encode_velocity(s.velocity));
     }

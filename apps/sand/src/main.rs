@@ -29,6 +29,8 @@ pub struct Config {
     pub brush_radius: f32,
     pub tool: usize,
     pub gravity: i32,
+    pub ceiling: i32,
+    pub request_odds: i32,
     pub mass_air: i32,
     pub mass_water: i32,
     pub mass_sand: i32,
@@ -54,6 +56,8 @@ impl Default for Config {
             brush_radius: 3.0,
             tool: 0,
             gravity: p.gravity as i32,
+            ceiling: p.ceiling as i32,
+            request_odds: p.request_odds as i32,
             mass_air: of(Air).mass as i32,
             mass_water: of(Water).mass as i32,
             mass_sand: of(Sand).mass as i32,
@@ -73,7 +77,12 @@ impl Config {
     pub fn physics(&self) -> sim::Physics {
         use sim::Material::{Air, Sand, Vacuum, Water};
         let u = |v: i32| v.max(0) as u32;
-        let mut p = sim::Physics { gravity: u(self.gravity), ..sim::Physics::default() };
+        let mut p = sim::Physics {
+            gravity: u(self.gravity),
+            ceiling: u(self.ceiling),
+            request_odds: u(self.request_odds),
+            ..sim::Physics::default()
+        };
         p.of_mut(Air).mass = u(self.mass_air);
         p.of_mut(Water).mass = u(self.mass_water);
         p.of_mut(Sand).mass = u(self.mass_sand);
@@ -98,6 +107,8 @@ impl Tunable for Config {
     fn schema(s: &mut Schema<Self>) {
         s.group("Physics")
             .int("gravity", "Gravity: impulse per move, per mass", "", 0..=1024, |c| &mut c.gravity)
+            .int("ceiling", "Velocity ceiling: the magnitude impulses approach", "", 1..=8192, |c| &mut c.ceiling)
+            .int("request_odds", "Requests: one proposal in this many (0: none)", "", 0..=64, |c| &mut c.request_odds)
             .int("mass_sand", "Mass of sand", "", 0..=16, |c| &mut c.mass_sand)
             .int("mass_water", "Mass of water", "", 0..=16, |c| &mut c.mass_water)
             .int("mass_air", "Mass of air", "", 0..=16, |c| &mut c.mass_air)

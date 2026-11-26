@@ -12,9 +12,9 @@ use crate::{Dir, Material, Physics, State, neighbor};
 /// that parity's velocity word. A neighbor at phase `p` reads the words of `p`'s parity, which the
 /// cell doesn't overwrite until it reaches `p + 2`, so a neighbor one phase ahead still serves it
 /// (the kept-back value), and no reader needs another word in step with it.
-const STATE_BITS: u32 = 19;
+const STATE_BITS: u32 = 20;
 pub(crate) const STATE_MASK: u32 = (1 << STATE_BITS) - 1;
-/// The phase is stored in the top 13 bits and wraps; neighbors are never more than one apart.
+/// The phase is stored in the top 12 bits and wraps; neighbors are never more than one apart.
 pub const PHASE_MASK: u32 = (1 << (32 - STATE_BITS)) - 1;
 /// Words per cell: state even, state odd, velocity even, velocity odd.
 pub const WORDS: usize = 4;
@@ -39,7 +39,17 @@ impl World {
         // A fresh lattice is empty space: vacuum.
         let v = State::VACUUM.velocity.encode();
         let cell = [word(State::VACUUM, 0), word(State::VACUUM, PHASE_MASK), v, v];
-        World { width, height, cells: cell.repeat((width * height) as usize), physics: Physics::default() }
+        let mut cells = cell.repeat((width * height) as usize);
+        // Initialization: whether a cell offers at once or waits one phase is a coin flip, so
+        // neighbors don't all offer in step.
+        for y in 0..height {
+            for x in 0..width {
+                if crate::hash(x, y, 0, crate::update::SALT_WAIT) & 1 == 1 {
+                    cells[WORDS * (y * width + x) as usize] = word(State { waits: true, ..State::VACUUM }, 0);
+                }
+            }
+        }
+        World { width, height, cells, physics: Physics::default() }
     }
 
     /// Rebuilds a world from raw cell words, e.g. a GPU readback.
@@ -113,17 +123,27 @@ impl World {
         Material::ALL.map(|m| self.count(m))
     }
 
+    /// The census of what is conserved: the substantial particles, in `Material::ALL` order, with
+    /// zero for vacuum and air (air is insubstantial: it can cease to exist and spawn anew).
+    pub fn conserved(&self) -> [usize; 6] {
+        Material::ALL.map(|m| if m.is_substantial() { self.count(m) } else { 0 })
+    }
+
     /// Whether every cell is at the same phase, as after a whole `step`.
     pub fn uniform(&self) -> bool {
         let p = self.phase(0, 0);
         (0..self.height).all(|y| (0..self.width).all(|x| self.phase(x, y) == p))
     }
 
-    /// Whether the cell is part of a live contract: it has an offer out, one awaiting its verdict,
-    /// or a particle in transport. The brush leaves such cells alone.
+    /// Whether the cell is part of a live contract: it has an offer or a request out, one awaiting
+    /// its verdict, or a particle in transport. The brush leaves such cells alone.
     pub fn engaged(&self, x: i32, y: i32) -> bool {
         let (now, kept) = (self.cell(x, y), self.kept(x, y));
-        now.offer.is_some() || now.accept.is_some() || kept.offer.is_some()
+        now.offer.is_some()
+            || now.request.is_some()
+            || now.accept.is_some()
+            || kept.offer.is_some()
+            || kept.request.is_some()
     }
 
     /// Overwrites the cell's current words, keeping its phase.
@@ -131,7 +151,9 @@ impl World {
         let i = self.index(x, y);
         let parity = self.current(i);
         let slot = WORDS * i + parity;
-        self.cells[slot] = word(s, self.cells[slot] >> STATE_BITS);
+        // Painting keeps the cell's initialization (whether it waits).
+        let waits = State::decode(self.cells[slot] & STATE_MASK, 0).waits;
+        self.cells[slot] = word(State { waits, ..s }, self.cells[slot] >> STATE_BITS);
         self.cells[WORDS * i + 2 + parity] = s.velocity.encode();
     }
 
@@ -167,13 +189,18 @@ impl World {
     /// the census after every step.
     pub fn step(&mut self) {
         #[cfg(debug_assertions)]
-        let before = self.census();
+        let before = self.conserved();
         for y in 0..self.height {
             for x in 0..self.width {
                 self.update(x, y);
             }
         }
         #[cfg(debug_assertions)]
-        assert_eq!(before, self.census(), "particles not conserved by a step at phase {}", self.phase(0, 0));
+        assert_eq!(
+            before,
+            self.conserved(),
+            "substantial particles not conserved by a step at phase {}",
+            self.phase(0, 0)
+        );
     }
 }

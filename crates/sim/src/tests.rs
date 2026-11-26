@@ -163,8 +163,8 @@ fn synchrony_a_ragged_front_of_phases_gives_the_same_world() {
 
 #[test]
 fn conservation_the_census_never_changes() {
-    // Contracts never create or lose a particle. Every count holds, measured on published state with
-    // each particle in transport counted once.
+    // Contracts never create or lose a substantial particle. Every count holds, measured on published
+    // state with each particle in transport counted once. (Air is insubstantial and not conserved.)
     let mut w = scattered(20, 16);
     for i in 0..12 {
         w.paint(3 + i, 4, Material::Air);
@@ -172,10 +172,10 @@ fn conservation_the_census_never_changes() {
         w.paint(3 + i, 14, Material::Water);
     }
     w.paint(10, 13, Material::Slate);
-    let census = w.census();
+    let census = w.conserved();
     for _ in 0..300 {
         w.step();
-        assert_eq!(w.census(), census, "{}", w.ascii());
+        assert_eq!(w.conserved(), census, "{}", w.ascii());
     }
 }
 
@@ -268,9 +268,13 @@ fn encoding_state_round_trips() {
         for velocity in velocities {
             for offer in [None, Some(Dir::Up), Some(Dir::UpLeft)] {
                 for accept in [None, Some(Dir::Down), Some(Dir::UpRight)] {
-                    let s = State { material, velocity, offer, accept };
-                    assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
-                    assert!(s.encode() < 1 << 19, "19 bits");
+                    for (reject, waits) in [(0, false), (1, true), (0b101010, false), (63, true)] {
+                        for (request, gives) in [(None, false), (Some(Dir::DownLeft), true), (Some(Dir::Up), false)] {
+                            let s = State { material, velocity, offer, accept, reject, request, gives, waits };
+                            assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
+                            assert!(s.encode() < 1 << 20, "20 bits");
+                        }
+                    }
                 }
             }
         }
@@ -283,10 +287,10 @@ fn encoding_a_cell_keeps_words_per_phase_parity() {
     // so the words a neighbor at p reads stay put until p + 2.
     let mut w = World::new(3, 3);
     w.paint(1, 0, Material::Bedrock);
-    const { assert!(STATE_MASK == (1 << 19) - 1 && PHASE_MASK == (1 << 13) - 1 && WORDS == 4) };
+    const { assert!(STATE_MASK == (1 << 20) - 1 && PHASE_MASK == (1 << 12) - 1 && WORDS == 4) };
     w.step();
     let words = &w.words()[WORDS..2 * WORDS];
-    assert_eq!((words[0] >> 19, words[1] >> 19), (0, 1));
+    assert_eq!((words[0] >> 20, words[1] >> 20), (0, 1));
     assert_eq!(State::decode(words[0] & STATE_MASK, words[2]), State::BEDROCK);
     assert_eq!((w.kept(1, 0), w.cell(1, 0)), (State::BEDROCK, State::BEDROCK));
 }
@@ -304,6 +308,8 @@ fn encoding_the_phase_wraps() {
 // The update's stages, one cell at a time
 
 const DOWN: Velocity = Velocity::DOWN;
+/// Falling fast: a magnitude near the ceiling, so its direction holds firmly.
+const FALLING: Velocity = Velocity { x: 0, y: 1000 };
 
 fn sand(velocity: Velocity) -> State {
     State { velocity, ..State::holding(Material::Sand) }
@@ -322,8 +328,10 @@ fn around(with: &[(Dir, State)]) -> [State; 6] {
     out
 }
 
-/// How often, over many phases, a cell's update proposes toward each direction (and nowhere, last).
+/// How often, over many phases, a cell's update offers toward each direction (and nowhere, last),
+/// in phases it proposes an offer (requests off).
 fn proposals(me: State, seen: [State; 6], physics: &Physics) -> [u32; 7] {
+    let physics = &Physics { request_odds: 0, ..*physics };
     let mut out = [0; 7];
     for phase in 0..4000 {
         let s = next(me, State::AIR, seen, 5, 5, phase, physics);
@@ -340,17 +348,19 @@ fn propose_a_new_particle_intends_to_move_down() {
 
 #[test]
 fn propose_follows_velocity() {
-    // Straight down is favored; the lower diagonals less; never against the velocity.
-    let counts = proposals(sand(DOWN), around(&[]), &Physics::default());
+    // Straight down is favored; the lower diagonals less; against the velocity, all but never.
+    let counts = proposals(sand(FALLING), around(&[]), &Physics::default());
     let down = counts[Dir::Down as usize];
     let diagonals = counts[Dir::DownLeft as usize] + counts[Dir::DownRight as usize];
     let upward = counts[Dir::Up as usize] + counts[Dir::UpLeft as usize] + counts[Dir::UpRight as usize];
     assert!(down > diagonals && diagonals > 0, "{counts:?}");
-    assert_eq!(upward + counts[6], 0, "{counts:?}");
+    assert!(upward <= 4 && counts[6] == 0, "{counts:?}");
     // A sideways velocity leans the other way.
-    let counts = proposals(sand(Velocity { x: 256, y: 0 }), around(&[]), &Physics::default());
+    let counts = proposals(sand(Velocity { x: 1000, y: 0 }), around(&[]), &Physics::default());
     assert!(counts[Dir::UpRight as usize] > 0 && counts[Dir::DownRight as usize] > 0, "{counts:?}");
-    assert_eq!(counts[Dir::Up as usize] + counts[Dir::Down as usize] + counts[Dir::UpLeft as usize], 0);
+    // Up and down are at right angles to it: rare. The left diagonals are against it: never.
+    assert!(counts[Dir::Up as usize] + counts[Dir::Down as usize] <= 40, "{counts:?}");
+    assert_eq!(counts[Dir::UpLeft as usize] + counts[Dir::DownLeft as usize], 0, "{counts:?}");
 }
 
 #[test]
@@ -401,7 +411,8 @@ fn propose_a_committed_particle_proposes_nothing_new() {
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     for phase in 0..50 {
         let s = next(me, State::AIR, seen, 2, 2, phase, &Physics::default());
-        assert_eq!(s, sand(DOWN), "the offer is cleared from the published state; the particle stays");
+        let rejected = State { reject: 1 << Dir::Up as u8, ..sand(DOWN) };
+        assert_eq!(s, rejected, "the offer is cleared from the published state; the particle stays");
     }
 }
 
@@ -439,7 +450,7 @@ fn evaluate_vacuum_is_filled_and_favors_the_heavier() {
     assert!(s.accept.is_some(), "{s:?}");
     // From above, sand outweighs air.
     let seen = around(&[
-        (Dir::Up, offering(Dir::Down, DOWN)),
+        (Dir::Up, offering(Dir::Down, FALLING)),
         (Dir::UpLeft, State { offer: Some(Dir::DownRight), ..State::AIR }),
     ]);
     let mut sand_won = 0;
@@ -447,7 +458,7 @@ fn evaluate_vacuum_is_filled_and_favors_the_heavier() {
         let s = next(State::VACUUM, State::AIR, seen, 2, 2, phase, &Physics::default());
         sand_won += (s.material == Material::Sand) as u32;
     }
-    assert!(sand_won > 1800, "{sand_won}");
+    assert!(sand_won > 1500, "{sand_won}");
 }
 
 #[test]
@@ -458,22 +469,62 @@ fn evaluate_sand_rejects_every_offer() {
 }
 
 #[test]
-fn evaluate_air_and_water_reject_every_offer() {
-    // Nothing is overwritten: a cell holding a particle has no capacity for another.
+fn evaluate_water_rejects_every_offer() {
+    // A cell holding a substantial particle has no capacity for another.
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
-    for m in [Material::Air, Material::Water] {
-        let s = next(State::holding(m), State::AIR, seen, 2, 2, 0, &Physics::default());
-        assert_eq!((s.material, s.accept), (m, None));
-    }
+    let s = next(State::holding(Material::Water), State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Water, None));
+}
+
+#[test]
+fn evaluate_air_gives_way_to_sand_but_not_to_air() {
+    // Air is insubstantial: sand transfers in and the air ceases to exist. Air can't take air.
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(State::AIR, State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
+    let seen = around(&[(Dir::Up, State { offer: Some(Dir::Down), ..State::AIR })]);
+    let s = next(State::AIR, State::AIR, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept), (Material::Air, None));
+}
+
+#[test]
+fn evaluate_air_tied_up_in_its_own_offer_rejects_sand() {
+    // Its air is in another castle: with its own offer out, its capacity is tied up, so it rejects
+    // the sand, explicitly.
+    let me = State { offer: Some(Dir::DownLeft), ..State::AIR };
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(me, State::AIR, seen, 2, 2, 1, &Physics::default());
+    assert_eq!((s.material, s.accept, s.rejected(Dir::Up)), (Material::Air, None, true));
+}
+
+#[test]
+fn resolve_an_offer_with_no_verdict_yet_stands() {
+    // The target names me in neither its acceptance nor its rejections: my offer stands, its
+    // particle still committed, and I propose nothing new.
+    let kept = offering(Dir::Down, DOWN);
+    let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..State::VACUUM })]);
+    let s = next(sand(DOWN), kept, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.velocity, s.offer), (Material::Sand, DOWN, Some(Dir::Down)));
+}
+
+#[test]
+fn resolve_accepted_air_spawns_a_new_air() {
+    // Air offered into vacuum, accepted: it transfers, and the origin spawns itself a fresh air.
+    let kept = State { offer: Some(Dir::Down), velocity: Velocity { x: 100, y: 256 }, ..State::AIR };
+    let seen = around(&[(Dir::Down, State { accept: Some(Dir::Up), ..State::AIR })]);
+    let s = next(State { offer: None, ..kept }, kept, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.velocity), (Material::Air, DOWN));
 }
 
 #[test]
 fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
-    // The capacity limit: one particle per cell. Only a cell holding nothing entertains an offer.
+    // The capacity limit: one particle per cell. A cell holding nothing entertains any offer; one
+    // holding air, which is insubstantial, an offer of a substantial particle; any other, none.
     let p = Physics::default();
     for holding in Material::ALL {
         for offered in [Material::Air, Material::Water, Material::Sand] {
-            assert_eq!(p.entertains(offered, holding), holding == Material::Vacuum, "{offered:?} into {holding:?}");
+            let room = holding == Material::Vacuum || (holding == Material::Air && offered != Material::Air);
+            assert_eq!(p.entertains(offered, holding, false), room, "{offered:?} into {holding:?}");
         }
     }
 }
@@ -481,16 +532,43 @@ fn evaluate_a_cell_holding_a_particle_entertains_no_offer_of_one() {
 #[test]
 fn gravity_is_an_impulse_on_each_move_turning_velocity_down() {
     let p = Physics::default();
-    // A particle intending to move right that moves turns toward down, at the steady scale.
+    // A particle intending to move right that moves turns toward down, gaining magnitude.
     let v = Velocity { x: 256, y: 0 };
     let s = next(State::VACUUM, State::AIR, around(&[(Dir::UpLeft, offering(Dir::DownRight, v))]), 2, 2, 0, &p);
     let impulse = (p.gravity * p.mass(Material::Sand)) as i32;
-    assert_eq!(s.velocity, Velocity::steady(256, impulse));
-    assert!(s.velocity.y > 0 && s.velocity.x == 256, "{:?}", s.velocity);
-    // Already pointing down, it stays down.
-    assert_eq!(p.moved(Material::Sand, DOWN), DOWN);
+    assert_eq!(s.velocity, p.impelled(v, 0, impulse));
+    assert!(s.velocity.y > 0 && s.velocity.x > 0, "{:?}", s.velocity);
+    let len = |v: Velocity| ((v.x as f64).powi(2) + (v.y as f64).powi(2)).sqrt();
+    assert!(len(s.velocity) > 256.0, "{:?}", s.velocity);
+    // Already pointing down, it stays down, and speeds up.
+    let down = p.moved(Material::Sand, DOWN);
+    assert!(down.x == 0 && down.y > DOWN.y, "{down:?}");
     // Air is lighter: the same move turns it less.
-    assert!(p.moved(Material::Air, v).y < p.moved(Material::Sand, v).y);
+    let (air, sand) = (p.moved(Material::Air, v), p.moved(Material::Sand, v));
+    assert!((air.y as i32 * sand.x as i32) < (sand.y as i32 * air.x as i32), "{air:?} {sand:?}");
+}
+
+#[test]
+fn velocity_magnitude_approaches_the_ceiling_and_never_passes_it() {
+    let p = Physics::default();
+    let mut v = DOWN;
+    let len = |v: Velocity| ((v.x as f64).powi(2) + (v.y as f64).powi(2)).sqrt();
+    let mut last = len(v);
+    for _ in 0..200 {
+        v = p.moved(Material::Sand, v);
+        assert!(len(v) >= last && len(v) <= p.ceiling as f64, "{v:?}");
+        last = len(v);
+    }
+    assert!(last > 0.9 * p.ceiling as f64, "{v:?}");
+    // Intending east hard, one impulse south barely turns it; many turn it south.
+    let east = Velocity { x: 1000, y: 0 };
+    let once = p.impelled(east, 0, 256);
+    assert!(once.x > 3 * once.y, "{once:?}");
+    let mut v = east;
+    for _ in 0..20 {
+        v = p.impelled(v, 0, 256);
+    }
+    assert!(v.y > 3 * v.x, "{v:?}");
 }
 
 #[test]
@@ -508,11 +586,11 @@ fn resolve_rejected_the_origin_keeps_its_particle_and_is_deflected() {
     let p = Physics::default();
     let v = Velocity { x: 100, y: 256 };
     let kept = offering(Dir::Down, v);
-    let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), ..sand(DOWN) })]);
+    let seen = around(&[(Dir::Down, State { accept: Some(Dir::UpLeft), reject: 1 << Dir::Up as u8, ..sand(DOWN) })]);
     let s = next(sand(v), kept, seen, 2, 2, 0, &p);
     assert_eq!(s.material, Material::Sand);
     assert_eq!(s.velocity, deflect(&p, Material::Sand, v, Dir::Down, 0));
-    assert!(s.velocity.x > v.x && s.velocity.y == 256, "{:?}", s.velocity);
+    assert!(s.velocity.x > v.x, "{:?}", s.velocity);
     assert!(s.offer.is_some());
 }
 
@@ -529,11 +607,16 @@ fn contract_terms_pair_each_verdict_with_an_effect_on_each_end() {
     let offer = Offer { toward: Dir::Down };
     let origin = offering(Dir::Down, DOWN);
     assert_eq!(offer.terms(Verdict::Accepted, origin, 7), (Effect::Release, Effect::Receive { from: Dir::Up, origin }));
+    // Air is insubstantial: accepted, its origin spawns a new one.
+    let air = State { offer: Some(Dir::Down), ..State::AIR };
+    assert_eq!(offer.terms(Verdict::Accepted, air, 7), (Effect::Spawn, Effect::Receive { from: Dir::Up, origin: air }));
     assert_eq!(offer.terms(Verdict::Rejected, origin, 7), (Effect::Deflect { from: Dir::Down, bits: 7 }, Effect::None));
-    // The origin reads the verdict from the target: accepted only when the target names it.
-    assert_eq!(offer.verdict(State { accept: Some(Dir::Up), ..State::AIR }), Verdict::Accepted);
-    assert_eq!(offer.verdict(State { accept: Some(Dir::UpLeft), ..State::AIR }), Verdict::Rejected);
-    assert_eq!(offer.verdict(State::VACUUM), Verdict::Rejected);
+    // The origin reads the verdict from the target: accepted when its acceptance names the origin,
+    // rejected when its rejections do, and no verdict yet otherwise.
+    assert_eq!(offer.verdict(State { accept: Some(Dir::Up), ..State::AIR }), Some(Verdict::Accepted));
+    assert_eq!(offer.verdict(State { reject: 1 << Dir::Up as u8, ..State::AIR }), Some(Verdict::Rejected));
+    assert_eq!(offer.verdict(State { accept: Some(Dir::UpLeft), ..State::AIR }), None);
+    assert_eq!(offer.verdict(State::VACUUM), None);
 }
 
 #[test]
@@ -580,7 +663,10 @@ fn contract_offer_evaluate_resolve_takes_three_phases() {
     for (x, y) in [(1, 0), (3, 0), (1, 1), (3, 1)] {
         w.paint(x, y, Material::Bedrock);
     }
-    w.step(); // propose
+    // Its first phase to offer: offers are offset, cell by cell.
+    while w.cell(2, 0).offer.is_none() {
+        w.step(); // propose
+    }
     assert_eq!(w.cell(2, 0).offer, Some(Dir::Down), "{}", w.ascii());
     w.step(); // evaluate
     assert_eq!((w.cell(2, 1).material, w.cell(2, 1).accept), (Material::Sand, Some(Dir::Up)));
@@ -629,26 +715,28 @@ fn materials(w: &World) -> Vec<Material> {
 }
 
 #[test]
-fn movement_a_packed_lattice_is_still() {
-    // Every cell holds a particle and nothing is overwritten: there is nowhere to move.
+fn movement_sand_settles_through_a_packed_lattice_of_air() {
+    // Air is insubstantial, so sand transfers into it: the sand sinks and the air ends up on top.
     let mut w = packed(12, 12);
-    let start = materials(&w);
-    for _ in 0..200 {
+    let (before, sand) = (mean_row(&w, Material::Sand), w.count(Material::Sand));
+    for _ in 0..3000 {
         w.step();
-        assert_eq!(materials(&w), start, "{}", w.ascii());
     }
+    assert!(mean_row(&w, Material::Sand) > before + 2.5, "{}", w.ascii());
+    assert!((0..4).all(|y| (0..12).all(|x| w.material(x, y) == Material::Air)), "{}", w.ascii());
+    assert_eq!(w.count(Material::Sand), sand);
 }
 
 #[test]
-fn movement_one_vacuum_cell_gets_a_packed_lattice_moving() {
-    let mut w = packed(12, 12);
+fn movement_air_fills_a_vacuum_cell_and_leaves_none_behind() {
+    // A lattice of air with one cell of vacuum: air above offers into it, and spawns itself anew.
+    let mut w = World::new(12, 12);
+    w.stamp(6.0, 6.0, 20.0, Material::Air);
     w.paint(6, 6, Material::Vacuum);
-    let start = materials(&w);
     for _ in 0..20 {
         w.step();
     }
-    assert_ne!(materials(&w), start, "{}", w.ascii());
-    assert_eq!(w.count(Material::Vacuum), 1);
+    assert_eq!(w.count(Material::Vacuum), 0, "{}", w.ascii());
 }
 
 #[test]
@@ -663,7 +751,7 @@ fn movement_a_grain_reaches_the_floor() {
 }
 
 #[test]
-fn movement_a_heap_holds_its_slope_and_goes_still() {
+fn movement_a_heap_holds_its_slope_and_nearly_stills() {
     let mut w = World::new(40, 20);
     for p in 0..3000u32 {
         if p % 12 == 0 && p < 1800 {
@@ -675,11 +763,13 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
     for _ in 0..50 {
         w.step();
     }
-    assert_eq!(materials(&w), before, "{}", w.ascii());
+    // A grain now and then still rolls down the face (v01.06: 12 cells changed in 50 phases).
+    let changed = materials(&w).iter().zip(&before).filter(|(a, b)| a != b).count();
+    assert!(changed <= 24, "{changed} changed\n{}", w.ascii());
     // A heap, not a layer: the middle column stands above the edges. (Sand's small deflection
-    // lowered it from 6 rows of rise to 4 in v01.05.)
+    // lowered it from 6 rows of rise to 4 in v01.05; velocity's weighting keeps 4 in v01.06.)
     let top = |x: i32| (0..20).find(|&y| w.material(x, y) == Material::Sand).unwrap_or(20);
-    assert!(top(20) + 3 < top(5), "{}", w.ascii());
+    assert!(top(20) + 3 < top(5), "rise {} - {}\n{}", top(5), top(20), w.ascii());
 }
 
 // Slate
@@ -687,13 +777,14 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
 #[test]
 fn propose_nothing_offers_into_slate() {
     let slate = State::holding(Material::Slate);
-    // Vacuum only straight up, where velocity never reaches.
+    // Vacuum only straight up, straight against the velocity: sand, heavy, never offers there, and
+    // so proposes nothing. Slate is never offered into.
     let seen = [State::VACUUM, slate, slate, slate, slate, slate];
     let p = Physics::default();
-    for m in [Material::Sand, Material::Water] {
-        let n = proposals(State::holding(m), seen, &p);
-        assert_eq!(n[6], 4000, "{m:?} proposes nothing: {n:?}");
-    }
+    let n = proposals(sand(FALLING), seen, &p);
+    assert_eq!(n[6], 4000, "sand proposes nothing: {n:?}");
+    let n = proposals(State::holding(Material::Water), seen, &p);
+    assert_eq!(n[Dir::Up as usize] + n[6], 4000, "water offers only up, if at all: {n:?}");
 }
 
 #[test]
@@ -722,7 +813,7 @@ fn water(velocity: Velocity) -> State {
 
 #[test]
 fn propose_water_still_prefers_down() {
-    let n = proposals(water(DOWN), [State::VACUUM; 6], &Physics::default());
+    let n = proposals(water(FALLING), [State::VACUUM; 6], &Physics::default());
     assert!(
         n[Dir::Down as usize] > n[Dir::DownLeft as usize] && n[Dir::DownLeft as usize] > n[Dir::UpLeft as usize] * 4,
         "{n:?}"
@@ -735,7 +826,7 @@ fn evaluate_water_rejects_sand_nothing_is_swapped_or_displaced() {
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(water(DOWN), State::AIR, seen, 2, 2, 0, &Physics::default());
     assert_eq!((s.material, s.accept), (Material::Water, None));
-    assert!(Physics::default().offers_to(Material::Sand, DOWN, Dir::Down, Material::Water));
+    assert!(Physics::default().offers_to(Material::Sand, Material::Water));
 }
 
 #[test]
@@ -759,16 +850,16 @@ fn movement_sand_rests_on_water_and_water_never_climbs() {
 }
 
 #[test]
-fn movement_air_is_a_very_light_particle_and_falls_in_vacuum() {
-    // All particles feel gravity: a cloud of air in empty space settles to the floor.
+fn movement_air_spreads_to_fill_vacuum() {
+    // A cloud of air in empty space: each air offered into vacuum and accepted spawns a new one, so
+    // the air fills the space, from the floor up.
     let mut w = World::new(16, 16);
     w.stamp(8.0, 4.0, 3.0, Material::Air);
-    let (before, cells) = (mean_row(&w, Material::Air), w.count(Material::Air));
     for _ in 0..600 {
         w.step();
     }
-    assert!(mean_row(&w, Material::Air) > before + 8.0, "{}", w.ascii());
-    assert_eq!(w.count(Material::Air), cells);
+    assert!(w.count(Material::Vacuum) <= 8, "{}", w.ascii());
+    assert!((8..16).all(|y| (0..16).all(|x| w.material(x, y) == Material::Air)), "{}", w.ascii());
 }
 
 #[test]
@@ -790,6 +881,121 @@ fn movement_water_seeks_its_level_where_sand_heaps() {
     let (min, max) = (depth.iter().min().unwrap(), depth.iter().max().unwrap());
     assert!(max - min <= 5, "water depths {depth:?}\n{}", w.ascii());
     let s = pour(Material::Sand);
+    // (v01.06: the heap is steep-sided, so its rise is measured out at the edge, column 2.)
     let top = |x: i32| (0..20).find(|&y| s.material(x, y) == Material::Sand).unwrap_or(20);
-    assert!(top(20) + 3 < top(5), "{}", s.ascii());
+    assert!(top(20) + 3 < top(2), "{}", s.ascii());
+}
+
+// Requests
+
+/// Physics where every proposal is a request.
+fn always_requesting() -> Physics {
+    Physics { request_odds: 1, ..Physics::default() }
+}
+
+#[test]
+fn propose_a_request_one_phase_in_request_odds() {
+    // Air with sand all around: it offers or requests; requests come about one phase in six.
+    let (mut offers, mut requests) = (0, 0);
+    for phase in 0..6000 {
+        let s = next(State::AIR, State::VACUUM, [sand(DOWN); 6], 5, 5, phase, &Physics::default());
+        offers += s.offer.is_some() as u32;
+        requests += s.request.is_some() as u32;
+    }
+    assert!((800..1200).contains(&requests), "{requests} requests, {offers} offers");
+    assert_eq!(offers + requests, 6000, "air offers into sand, unlikely but not excluded");
+}
+
+#[test]
+fn propose_a_request_asks_the_neighbor_whose_velocity_points_here() {
+    // Sand falling above, sand falling below: the one above points here.
+    let seen = around(&[(Dir::Up, sand(FALLING)), (Dir::Down, sand(FALLING)), (Dir::DownLeft, State::BEDROCK)]);
+    let mut counts = [0; 7];
+    for phase in 0..2000 {
+        let s = next(State::VACUUM, State::VACUUM, seen, 5, 5, phase, &always_requesting());
+        counts[s.request.map_or(6, |d| d as usize)] += 1;
+    }
+    assert!(counts[Dir::Up as usize] > 1900, "{counts:?}");
+    assert_eq!(counts[Dir::DownLeft as usize], 0, "bedrock has nothing to give: {counts:?}");
+}
+
+#[test]
+fn propose_no_request_without_room() {
+    // Sand has no room for another particle; air has none for air.
+    let s = next(sand(DOWN), State::VACUUM, [sand(DOWN); 6], 5, 5, 0, &always_requesting());
+    assert_eq!((s.offer, s.request), (None, None));
+    let s = next(State::AIR, State::VACUUM, [State::AIR; 6], 5, 5, 0, &always_requesting());
+    assert_eq!((s.offer, s.request), (None, None));
+}
+
+#[test]
+fn evaluate_a_request_is_accepted_and_the_particle_given() {
+    // Vacuum below requests my sand: I accept, still holding it, committed to the transfer.
+    let seen = around(&[(Dir::Down, State { request: Some(Dir::Up), ..State::VACUUM })]);
+    let s = next(sand(DOWN), State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.gives), (Material::Sand, Some(Dir::Down), true));
+    assert_eq!((s.offer, s.request), (None, None), "a given particle proposes nothing");
+    assert_eq!(s.counts_as(), Material::Sand, "the giver counts it until it resolves");
+}
+
+#[test]
+fn evaluate_a_tied_up_particle_rejects_a_request() {
+    let seen = around(&[(Dir::Down, State { request: Some(Dir::Up), ..State::VACUUM })]);
+    let s = next(offering(Dir::DownLeft, DOWN), State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.accept, s.reject), (None, 1 << Dir::Down as u8));
+}
+
+#[test]
+fn evaluate_capacity_tied_up_in_a_request_rejects_offers() {
+    let me = State { request: Some(Dir::Down), ..State::VACUUM };
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(me, State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.reject), (Material::Vacuum, None, 1 << Dir::Up as u8));
+}
+
+#[test]
+fn evaluate_a_matched_pair_is_accepted_automatically() {
+    // I request from above while above offers to me: I accept its offer.
+    let me = State { request: Some(Dir::Up), ..State::VACUUM };
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let s = next(me, State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.reject), (Material::Sand, Some(Dir::Up), 0));
+    // And above, offering to me while I request it, gives my request no verdict of its own.
+    let seen = around(&[(Dir::Down, State { request: Some(Dir::Up), ..State::VACUUM })]);
+    let s = next(offering(Dir::Down, DOWN), State::VACUUM, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.accept, s.reject, s.gives), (None, 0, false));
+}
+
+#[test]
+fn resolve_an_accepted_request_takes_the_particle_and_the_giver_lets_it_go() {
+    let p = Physics::default();
+    let kept = State { request: Some(Dir::Up), ..State::AIR };
+    let giver = State { accept: Some(Dir::Down), gives: true, ..sand(DOWN) };
+    let s = next(State::AIR, kept, around(&[(Dir::Up, giver)]), 2, 2, 0, &p);
+    assert_eq!((s.material, s.velocity), (Material::Sand, p.moved(Material::Sand, DOWN)));
+    assert_eq!(s.accept, None, "the taker counts the particle from now on");
+    let s = next(giver, State::VACUUM, around(&[]), 2, 2, 0, &p);
+    assert_eq!(s.counts_as(), Material::Vacuum);
+    // Given air spawns a new air.
+    let s =
+        next(State { accept: Some(Dir::Down), gives: true, ..State::AIR }, State::VACUUM, [State::AIR; 6], 2, 2, 0, &p);
+    assert_eq!(s.material, Material::Air);
+}
+
+#[test]
+fn resolve_a_rejected_request_frees_the_capacity_and_one_with_no_verdict_stands() {
+    let p = Physics::default();
+    let kept = State { request: Some(Dir::Up), ..State::VACUUM };
+    let s = next(
+        State::VACUUM,
+        kept,
+        around(&[(Dir::Up, State { reject: 1 << Dir::Down as u8, ..sand(DOWN) })]),
+        2,
+        2,
+        0,
+        &p,
+    );
+    assert_eq!((s.material, s.request), (Material::Vacuum, None));
+    let s = next(State::VACUUM, kept, around(&[(Dir::Up, sand(DOWN))]), 2, 2, 0, &p);
+    assert_eq!(s.request, Some(Dir::Up));
 }
