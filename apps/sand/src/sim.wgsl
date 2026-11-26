@@ -370,9 +370,10 @@ fn select_from(weights: ptr<function, array<u32, 6>>, bits: u32) -> u32 {
     return 0u;
 }
 
-// `update::offers_now`: whether a cell may offer at this phase, a bit of the hash of its position and phase.
+// `update::offers_now`: only the very first phase is in question: on initialization, whether a cell
+// offers at once or waits one phase is a coin flip.
 fn offers_now(x: i32, y: i32, phase: u32) -> bool {
-    return (hash(x, y, phase, SALT_OFFSET) & 1u) == 0u;
+    return phase != 0u || (hash(x, y, 0u, SALT_OFFSET) & 1u) == 0u;
 }
 
 // One update: read, resolve, evaluate, evolve, publish, propose (`update::next`).

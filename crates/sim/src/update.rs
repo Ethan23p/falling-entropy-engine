@@ -38,10 +38,10 @@ pub fn next(me: State, kept: State, seen: [State; 6], x: i32, y: i32, phase: u32
     live
 }
 
-/// Whether a cell may offer at this phase: a bit of the hash of its position and phase, so
-/// neighbors don't all offer at once.
+/// Whether a cell may offer at this phase. Only the very first is in question: on initialization,
+/// whether a cell offers at once or waits one phase is a coin flip (a bit of its position's hash).
 pub fn offers_now(x: i32, y: i32, phase: u32) -> bool {
-    hash(x, y, phase, SALT_OFFSET) & 1 == 0
+    phase != 0 || hash(x, y, 0, SALT_OFFSET) & 1 == 0
 }
 
 /// Resolve: the offer I published last phase (now in my kept-back state) has its verdict, if any,
