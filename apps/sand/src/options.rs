@@ -99,7 +99,7 @@ pub fn draw(shapes: &mut Shapes, area: Rect, portrait: bool, s: Screen, tool: us
                 let (name, _, color) = TOOLS[i];
                 let swatch = s.em(0.45);
                 let label_w = shapes.text_width(text, name);
-                if r.size.x > label_w + swatch * 5.0 {
+                if !portrait && r.size.x > label_w + swatch * 5.0 {
                     // The swatch, then the name, left to right.
                     let left = r.min.x + s.em(0.9);
                     shapes.circle(Vec2::new(left + swatch, r.center().y), swatch, rgb(color));
