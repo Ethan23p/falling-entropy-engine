@@ -191,7 +191,7 @@ fn brush_paints_and_erases() {
 }
 
 #[test]
-fn brush_paints_only_into_vacuum() {
+fn brush_paints_only_into_insubstantial_mass() {
     let mut w = World::new(4, 4);
     w.paint(1, 1, Material::Sand);
     w.paint(1, 1, Material::Bedrock);
@@ -201,7 +201,120 @@ fn brush_paints_only_into_vacuum() {
     assert_eq!(w.material(2, 2), Material::Bedrock, "sand does not replace bedrock");
     w.paint(3, 3, Material::Air);
     w.paint(3, 3, Material::Sand);
-    assert_eq!(w.material(3, 3), Material::Air, "sand does not replace air");
+    assert_eq!(w.material(3, 3), Material::Sand, "sand replaces air: air is insubstantial");
+    w.paint(3, 2, Material::Water);
+    w.paint(3, 2, Material::Air);
+    assert_eq!(w.material(3, 2), Material::Water, "air does not replace water");
+}
+
+/// Every cell a placed tetrahex covers, as a sorted set.
+fn cover(t: &Placed) -> Vec<(i32, i32)> {
+    let mut cells = t.cells();
+    cells.sort();
+    cells.dedup();
+    cells
+}
+
+/// Whether the cells are one edge-connected piece.
+fn connected(cells: &[(i32, i32)]) -> bool {
+    let mut seen = vec![cells[0]];
+    let mut i = 0;
+    while i < seen.len() {
+        let (x, y) = seen[i];
+        for d in Dir::ALL {
+            let n = neighbor(x, y, d);
+            if cells.contains(&n) && !seen.contains(&n) {
+                seen.push(n);
+            }
+        }
+        i += 1;
+    }
+    seen.len() == cells.len()
+}
+
+#[test]
+fn brush_tetrahexes_are_the_seven() {
+    // Up to turns and mirroring, the seven shapes are distinct, and each is four joined hexes.
+    let canonical = |shape| {
+        let mut forms: Vec<Vec<(i32, i32)>> = (0..12)
+            .map(|k| {
+                let c = cover(&Placed::new(shape, k % 6, k >= 6, 0, (0, 0)));
+                let (mq, mr) = c.iter().map(|&(x, y)| to_axial(x, y)).min().unwrap();
+                let mut c: Vec<_> = c.iter().map(|&(x, y)| to_axial(x, y)).map(|(q, r)| (q - mq, r - mr)).collect();
+                c.sort();
+                c
+            })
+            .collect();
+        forms.sort();
+        forms[0].clone()
+    };
+    let mut all: Vec<_> = Tetrahex::ALL.iter().map(|&s| canonical(s)).collect();
+    for &s in &Tetrahex::ALL {
+        let c = cover(&Placed::new(s, 0, false, 0, (5, 5)));
+        assert_eq!(c.len(), 4, "{s:?}");
+        assert!(connected(&c), "{s:?}");
+    }
+    all.dedup();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 7);
+}
+
+#[test]
+fn brush_tetrahex_volume_is_normalized() {
+    // At every size, every shape in every orientation covers the same number of cells, in one piece.
+    for radius in 0..6 {
+        let want = 4 * (3 * radius * radius + 3 * radius + 1) as usize;
+        for &s in &Tetrahex::ALL {
+            for k in 0..12 {
+                let t = Placed::new(s, k % 6, k >= 6, radius, (40, 40));
+                let c = cover(&t);
+                assert_eq!((c.len(), t.volume()), (want, want), "{s:?} turn {k} radius {radius}");
+                assert!(connected(&c), "{s:?} turn {k} radius {radius}");
+            }
+        }
+    }
+}
+
+#[test]
+fn brush_tetrahex_is_centred_where_placed() {
+    for radius in 0..5 {
+        for seed in 0..40 {
+            let t = Placed::random(seed, radius, (30, 30));
+            let c = cover(&t);
+            let n = c.len() as f32;
+            let (mx, my) = c.iter().fold((0.0, 0.0), |s, &(x, y)| (s.0 + x as f32 / n, s.1 + y as f32 / n));
+            let reach = 1.0 + radius as f32;
+            assert!((mx - 30.0).abs() <= reach && (my - 30.0).abs() <= reach, "{t:?}: mean ({mx}, {my})");
+        }
+    }
+}
+
+#[test]
+fn brush_stamp_tetrahex_paints_what_it_covers() {
+    let mut w = World::new(20, 20);
+    let t = Placed::new(Tetrahex::Wave, 1, false, 1, (10, 10));
+    w.stamp_tetrahex(&t, Material::Sand);
+    let mut want: Vec<_> = cover(&t);
+    want.sort_by_key(|&(x, y)| (y, x));
+    assert_eq!(sand_at(&w), want);
+    // Off the edge, it paints what lies on the lattice.
+    let mut w = World::new(6, 6);
+    w.stamp_tetrahex(&Placed::new(Tetrahex::Bar, 0, false, 2, (0, 0)), Material::Water);
+    assert!(w.count(Material::Water) > 0 && w.count(Material::Water) < 76);
+}
+
+#[test]
+fn lattice_axial_round_trips_and_measures_steps() {
+    for y in -5..5 {
+        for x in -5..5 {
+            let (q, r) = to_axial(x, y);
+            assert_eq!(from_axial(q, r), (x, y));
+            for d in Dir::ALL {
+                assert_eq!(hex_distance((q, r), to_axial(neighbor(x, y, d).0, neighbor(x, y, d).1)), 1);
+            }
+        }
+    }
 }
 
 #[test]

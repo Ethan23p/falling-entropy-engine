@@ -14,7 +14,7 @@
   </style>
 </head>
 <body>
-  <canvas id="canvas"></canvas>
+  <canvas id="canvas" oncontextmenu="return false"></canvas>
   <p id="no-webgpu" hidden>This needs a browser with WebGPU.</p>
   <script>if (!navigator.gpu) document.getElementById('no-webgpu').hidden = false;</script>
 </body>

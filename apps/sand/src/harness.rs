@@ -15,7 +15,7 @@ use scenes::Scene;
 use scenes::run::{Run, Trigger, pile_angle};
 
 use crate::Config;
-use crate::gpu::{Lattice, Pipelines};
+use crate::gpu::{Lattice, Look, Pipelines};
 
 const USAGE: &str = "\
 usage:
@@ -28,7 +28,7 @@ usage:
       --until SECONDS   run at most this long (default: the last --at, or 30 with --when)
       --set ID=VALUE    a config value for this run, as Copy values writes it (repeatable)
       --size WxH        lattice size in cells (default 160x100)
-      --cell PX         pixels per cell (default 3)
+      --cell PX         pixels across each hexagon (default 4)
       --tag NAME        written as <scene>-<tag>.png, to keep runs side by side
       --out DIR         where strips go (default target/strips)
   cargo run -p sand -- bench
@@ -72,7 +72,7 @@ fn parse_strip(args: &[String]) -> Result<StripArgs, String> {
         until: None,
         set: Vec::new(),
         size: (160, 100),
-        cell: 3,
+        cell: 4,
         tag: None,
         out: PathBuf::from("target/strips"),
     };
@@ -229,7 +229,10 @@ impl Renderer {
     }
 
     fn render(&self, world: &sim::World, cell: u32) -> RgbaImage {
-        let (width, height) = (world.width() as u32 * cell, (world.height() as u32 * 2 + 1) * cell / 2);
+        // `cell` pixels across each hexagon, corner to corner.
+        let size = cell as f32 * 0.5;
+        let span = crate::view::extent(world.width(), world.height()) * size;
+        let (width, height) = (span.x.ceil() as u32, span.y.ceil() as u32);
         let lattice = Lattice::new(&self.device, &self.pipelines, world);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("strip frame"),
@@ -252,8 +255,9 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let px = cell as f32;
-        lattice.render(&self.queue, &self.pipelines, &mut encoder, &view, [0.0, 0.0], [px, px]);
+        let look = Look { size, texel: 1.0, origin: [0.0, 0.0], edges: 0.22, ghost: None };
+        let clear = Some(wgpu::Color { r: 0.031, g: 0.035, b: 0.047, a: 1.0 });
+        lattice.render(&self.queue, &self.pipelines, &mut encoder, &view, &look, [0, 0, width, height], clear);
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {

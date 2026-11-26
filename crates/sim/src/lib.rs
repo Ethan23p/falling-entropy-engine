@@ -13,7 +13,7 @@
 //! | Synchronizer (phase) | `world`: `World::update`, `World::step` |
 //! | Selection | `selection` |
 //! | Physics distribution, Movement, Gravity, material properties | `physics`: data (per-material properties, gravity) and pure functions only |
-//! | Brush | `brush` |
+//! | Brush (random tetrahexes, normalized volume) | `brush` |
 //!
 //! Randomness (`random`) comes only from the hash of a cell's position, its phase and a salt.
 
@@ -29,8 +29,9 @@ pub mod selection;
 mod update;
 mod world;
 
+pub use brush::{Placed, Tetrahex};
 pub use cell::State;
-pub use lattice::{Dir, neighbor};
+pub use lattice::{Dir, from_axial, hex_distance, neighbor, to_axial};
 pub use particle::{Material, Velocity};
 pub use physics::Physics;
 pub use random::hash;
