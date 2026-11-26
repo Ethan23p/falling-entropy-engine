@@ -39,6 +39,9 @@ pub struct Config {
     pub deflect_air: i32,
     pub deflect_water: i32,
     pub deflect_sand: i32,
+    pub tolerance_air: i32,
+    pub tolerance_water: i32,
+    pub tolerance_sand: i32,
 }
 
 impl Default for Config {
@@ -64,6 +67,9 @@ impl Default for Config {
             deflect_air: of(Air).deflect as i32,
             deflect_water: of(Water).deflect as i32,
             deflect_sand: of(Sand).deflect as i32,
+            tolerance_air: of(Air).tolerance as i32,
+            tolerance_water: of(Water).tolerance as i32,
+            tolerance_sand: of(Sand).tolerance as i32,
         }
     }
 }
@@ -84,6 +90,9 @@ impl Config {
         p.of_mut(Air).deflect = u(self.deflect_air);
         p.of_mut(Water).deflect = u(self.deflect_water);
         p.of_mut(Sand).deflect = u(self.deflect_sand);
+        p.of_mut(Air).tolerance = u(self.tolerance_air);
+        p.of_mut(Water).tolerance = u(self.tolerance_water);
+        p.of_mut(Sand).tolerance = u(self.tolerance_sand);
         p
     }
 
@@ -107,7 +116,10 @@ impl Tunable for Config {
             .int("into_vacuum", "Weight of moving into vacuum", "", 0..=255, |c| &mut c.into_vacuum)
             .int("deflect_water", "Deflection of water on rejection", "", 0..=1024, |c| &mut c.deflect_water)
             .int("deflect_sand", "Deflection of sand on rejection", "", 0..=1024, |c| &mut c.deflect_sand)
-            .int("deflect_air", "Deflection of air on rejection", "", 0..=1024, |c| &mut c.deflect_air);
+            .int("deflect_air", "Deflection of air on rejection", "", 0..=1024, |c| &mut c.deflect_air)
+            .int("tolerance_air", "Directional tolerance of air", "", 0..=1024, |c| &mut c.tolerance_air)
+            .int("tolerance_water", "Directional tolerance of water", "", 0..=1024, |c| &mut c.tolerance_water)
+            .int("tolerance_sand", "Directional tolerance of sand", "", 0..=1024, |c| &mut c.tolerance_sand);
         s.group("Rates").float("sim_rate", "Sim rate", "phases/s", 1.0..=960.0, 1.0, |c| &mut c.sim_rate).int(
             "max_phases",
             "Most phases per render frame",

@@ -17,7 +17,7 @@ struct Properties {
     mass: u32,
     into: u32,
     deflect: u32,
-    _pad: u32,
+    tolerance: u32,
 }
 
 // The lattice's size and the stamp count, then the physics distribution's data (`Physics`):
@@ -59,6 +59,7 @@ const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const ALONG_CAP: u32 = 1024u;
 const DEFLECT_CAP: u32 = 1024u;
+const TOLERANCE_CAP: u32 = 1024u;
 const SCALE: i32 = 256;
 
 // Randomness (`random`).
@@ -200,17 +201,21 @@ fn into(dest: u32) -> u32 {
     return min(params.materials[dest].into, INTO_CAP);
 }
 
+// `Physics::tolerance`: how allowing a particle is with its directionality.
+fn tolerance(m: u32) -> u32 {
+    return min(params.materials[m].tolerance, TOLERANCE_CAP);
+}
+
 // `Physics::deflection`.
 fn deflection(m: u32) -> u32 {
     return min(params.materials[m].deflect, DEFLECT_CAP);
 }
 
-// `Physics::offers_to`, propose's exclusion: what might a cell holding a particle of m, intending
-// v, offer to? A neighbor toward d holding nothing, or a particle that moves and that m is amenable
-// to, lying ahead of the intent (provisional: within 90 degrees, a hard limit for every material).
-fn offers_to(m: u32, v: vec2<i32>, d: u32, dest: u32) -> bool {
+// `Physics::offers_to`, propose's exclusion: what might a cell holding a particle of m offer to? A
+// neighbor holding nothing, or a particle that moves and that m is amenable to. Direction only weighs.
+fn offers_to(m: u32, dest: u32) -> bool {
     let amenable = !is_particle(dest) || (moves(dest) && into(dest) > 0u);
-    return moves(m) && amenable && along(v, d) > 0;
+    return moves(m) && amenable;
 }
 
 // `Physics::entertains`, evaluate's exclusion, the capacity limit: a cell holding a substantial
@@ -224,7 +229,7 @@ fn entertains(offered: u32, dest: u32) -> bool {
 // `Physics::weight`.
 fn weight(m: u32, v: vec2<i32>, d: u32, dest: u32) -> u32 {
     let a = min(u32(max(along(v, d), 0)), ALONG_CAP);
-    return into(dest) * mass(m) * ((a * a) >> 8u);
+    return into(dest) * mass(m) * (((a * a) >> 8u) + tolerance(m));
 }
 
 // `Physics::moved`, gravity: its impulse, added on a move, then back to the steady scale.
@@ -350,7 +355,7 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         for (var d = 0u; d < 6u; d++) {
             let dest = (*seen)[d].material;
-            if offers_to(live.material, live.velocity, d, dest) {
+            if offers_to(live.material, dest) {
                 weights[d] = weight(live.material, live.velocity, d, dest);
             }
         }

@@ -340,7 +340,8 @@ fn propose_a_new_particle_intends_to_move_down() {
 
 #[test]
 fn propose_follows_velocity() {
-    // Straight down is favored; the lower diagonals less; never against the velocity.
+    // Straight down is favored; the lower diagonals less; sand, with no directional tolerance,
+    // never against the velocity.
     let counts = proposals(sand(DOWN), around(&[]), &Physics::default());
     let down = counts[Dir::Down as usize];
     let diagonals = counts[Dir::DownLeft as usize] + counts[Dir::DownRight as usize];
@@ -733,13 +734,28 @@ fn movement_a_heap_holds_its_slope_and_goes_still() {
 #[test]
 fn propose_nothing_offers_into_slate() {
     let slate = State::holding(Material::Slate);
-    // Vacuum only straight up, where velocity never reaches.
+    // Vacuum only straight up, against the velocity: sand, with no directional tolerance, proposes
+    // nothing; water, a little tolerant, sometimes proposes up; nothing proposes into slate.
     let seen = [State::VACUUM, slate, slate, slate, slate, slate];
     let p = Physics::default();
-    for m in [Material::Sand, Material::Water] {
-        let n = proposals(State::holding(m), seen, &p);
-        assert_eq!(n[6], 4000, "{m:?} proposes nothing: {n:?}");
-    }
+    let n = proposals(State::holding(Material::Sand), seen, &p);
+    assert_eq!(n[6], 4000, "sand proposes nothing: {n:?}");
+    let n = proposals(State::holding(Material::Water), seen, &p);
+    assert_eq!(n[Dir::Up as usize] + n[6], 4000, "water proposes up or nothing: {n:?}");
+    assert!(n[Dir::Up as usize] > 0, "{n:?}");
+}
+
+#[test]
+fn propose_against_the_velocity_is_unlikely_and_air_is_most_allowing() {
+    // A move against the velocity weighs the material's directional tolerance: never more likely
+    // than down, and more allowing for air than for water.
+    let up_share = |m: Material| {
+        let n = proposals(State::holding(m), [State::VACUUM; 6], &Physics::default());
+        assert!(n[Dir::Down as usize] > n[Dir::Up as usize], "{m:?} {n:?}");
+        n[Dir::Up as usize] + n[Dir::UpLeft as usize] + n[Dir::UpRight as usize]
+    };
+    assert!(up_share(Material::Air) > up_share(Material::Water), "air is more allowing than water");
+    assert!(up_share(Material::Water) > 0);
 }
 
 #[test]
@@ -781,7 +797,7 @@ fn evaluate_water_rejects_sand_nothing_is_swapped_or_displaced() {
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(water(DOWN), State::AIR, seen, 2, 2, 0, &Physics::default());
     assert_eq!((s.material, s.accept), (Material::Water, None));
-    assert!(Physics::default().offers_to(Material::Sand, DOWN, Dir::Down, Material::Water));
+    assert!(Physics::default().offers_to(Material::Sand, Material::Water));
 }
 
 #[test]
@@ -807,13 +823,13 @@ fn movement_sand_rests_on_water_and_water_never_climbs() {
 #[test]
 fn movement_air_spreads_to_fill_vacuum() {
     // A cloud of air in empty space: each air offered into vacuum and accepted spawns a new one, so
-    // the air fills the space, from the floor up.
+    // the air fills the space, from the floor up; tolerant of direction, it reaches the top too.
     let mut w = World::new(16, 16);
     w.stamp(8.0, 4.0, 3.0, Material::Air);
     for _ in 0..600 {
         w.step();
     }
-    assert!(w.count(Material::Vacuum) <= 8, "{}", w.ascii());
+    assert_eq!(w.count(Material::Vacuum), 0, "{}", w.ascii());
     assert!((8..16).all(|y| (0..16).all(|x| w.material(x, y) == Material::Air)), "{}", w.ascii());
 }
 
