@@ -295,12 +295,14 @@ fn brush_stamp_tetrahex_paints_what_it_covers() {
     let mut w = World::new(20, 20);
     let t = Placed::new(Tetrahex::Wave, 1, false, 1, (10, 10));
     w.stamp_tetrahex(&t, Material::Sand);
+    w.settle();
     let mut want: Vec<_> = cover(&t);
     want.sort_by_key(|&(x, y)| (y, x));
     assert_eq!(sand_at(&w), want);
     // Off the edge, it paints what lies on the lattice.
     let mut w = World::new(6, 6);
     w.stamp_tetrahex(&Placed::new(Tetrahex::Bar, 0, false, 2, (0, 0)), Material::Water);
+    w.settle();
     assert!(w.count(Material::Water) > 0 && w.count(Material::Water) < 76);
 }
 
@@ -334,6 +336,7 @@ fn brush_cannot_erase_bedrock() {
     w.paint(1, 1, Material::Bedrock);
     w.paint(1, 1, Material::Vacuum);
     w.stamp(1.0, 1.0, 3.0, Material::Vacuum);
+    w.settle();
     assert_eq!(w.material(1, 1), Material::Bedrock);
 }
 
@@ -341,6 +344,7 @@ fn brush_cannot_erase_bedrock() {
 fn brush_stamp_covers_a_disc_of_centres() {
     let mut w = World::new(9, 9);
     w.stamp(4.0, 4.0, 1.2, Material::Sand);
+    w.settle();
     // Even column 4: (4,3), (4,4), (4,5); odd columns 3 and 5 sit half a cell lower: rows 3 and 4.
     assert_eq!(sand_at(&w), vec![(3, 3), (4, 3), (5, 3), (3, 4), (4, 4), (5, 4), (4, 5)]);
 }
@@ -845,6 +849,7 @@ fn movement_air_fills_a_vacuum_cell_and_leaves_none_behind() {
     // A lattice of air with one cell of vacuum: air above offers into it, and spawns itself anew.
     let mut w = World::new(12, 12);
     w.stamp(6.0, 6.0, 20.0, Material::Air);
+    w.settle();
     w.paint(6, 6, Material::Vacuum);
     for _ in 0..20 {
         w.step();
@@ -869,6 +874,7 @@ fn movement_a_heap_holds_its_slope_and_nearly_stills() {
     for p in 0..3000u32 {
         if p % 12 == 0 && p < 1800 {
             w.stamp(20.0, 1.0, 0.8, Material::Sand);
+            w.settle();
         }
         w.step();
     }
@@ -908,6 +914,7 @@ fn movement_slate_holds_sand_up() {
         w.paint(x, 10, Material::Slate);
     }
     w.stamp(10.0, 4.0, 2.5, Material::Sand);
+    w.settle();
     let grains = w.count(Material::Sand);
     for _ in 0..800 {
         w.step();
@@ -968,6 +975,7 @@ fn movement_air_spreads_to_fill_vacuum() {
     // the air fills the space, from the floor up.
     let mut w = World::new(16, 16);
     w.stamp(8.0, 4.0, 3.0, Material::Air);
+    w.settle();
     for _ in 0..600 {
         w.step();
     }
@@ -984,6 +992,7 @@ fn movement_water_seeks_its_level_where_sand_heaps() {
         for p in 0..5000u32 {
             if p % 12 == 0 && p < 1800 {
                 w.stamp(20.0, 1.0, 0.8, m);
+                w.settle();
             }
             w.step();
         }
@@ -1111,4 +1120,29 @@ fn resolve_a_rejected_request_frees_the_capacity_and_one_with_no_verdict_stands(
     assert_eq!((s.material, s.request), (Material::Vacuum, None));
     let s = next(State::VACUUM, kept, around(&[(Dir::Up, sand(DOWN))]), 2, 2, 0, &p);
     assert_eq!(s.request, Some(Dir::Up));
+}
+
+#[test]
+fn brush_offer_waits_for_air_busy_in_a_contract() {
+    // Air among air is engaged most of the time; the brush's offers wait for each cell to come free,
+    // so a stamp onto air covers its whole volume, as onto vacuum.
+    for fill in [Material::Air, Material::Vacuum] {
+        let mut w = World::new(40, 40);
+        for y in 0..40 {
+            for x in 0..40 {
+                w.paint(x, y, fill);
+            }
+        }
+        for _ in 0..50 {
+            w.step();
+        }
+        let t = Placed::new(Tetrahex::Bee, 0, false, 3, (20, 20));
+        w.stamp_tetrahex(&t, Material::Sand);
+        w.settle();
+        let at_once = w.count(Material::Sand);
+        for _ in 0..BRUSH_WAIT {
+            w.step();
+        }
+        assert_eq!(w.count(Material::Sand), t.volume(), "{fill:?} (painted at once: {at_once})");
+    }
 }

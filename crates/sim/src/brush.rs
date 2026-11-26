@@ -15,39 +15,80 @@ impl World {
     /// anything but bedrock. A painted particle intends to move down (`State::holding`). Cells
     /// engaged in a contract are left alone. Call it between phases.
     pub fn paint(&mut self, x: i32, y: i32, material: Material) {
-        let here = self.material(x, y);
-        let allowed =
-            here != material && here != Material::Bedrock && (material == Material::Vacuum || !here.is_substantial());
-        if allowed && !self.engaged(x, y) {
+        if self.accepts(x, y, material) {
             self.set(x, y, State::holding(material));
         }
     }
 
-    /// A disc stamp (scene scripts): `paint` every cell whose centre lies within `radius` of
-    /// `(cx, cy)`, in cell units, where a cell's centre is `(x, y + 0.5)` in odd columns and `(x, y)`
-    /// in even ones.
+    /// Whether the cell would take `material` from the brush now (`paint`).
+    fn accepts(&self, x: i32, y: i32, material: Material) -> bool {
+        let here = self.material(x, y);
+        let allowed =
+            here != material && here != Material::Bedrock && (material == Material::Vacuum || !here.is_substantial());
+        allowed && !self.engaged(x, y)
+    }
+
+    /// A disc stamp (scene scripts): offers its material (`offer`) to every cell whose centre lies
+    /// within `radius` of `(cx, cy)`, in cell units, where a cell's centre is `(x, y + 0.5)` in odd
+    /// columns and `(x, y)` in even ones.
     pub fn stamp(&mut self, cx: f32, cy: f32, radius: f32, material: Material) {
         for y in 0..self.height() {
             for x in 0..self.width() {
                 let (dx, dy) = (x as f32 - cx, y as f32 + 0.5 * (x & 1) as f32 - cy);
                 if dx * dx + dy * dy <= radius * radius {
-                    self.paint(x, y, material);
+                    self.offer(x, y, material);
                 }
             }
         }
     }
 
-    /// The brush's stamp: `paint` every cell of a placed tetrahex that lies on the lattice.
+    /// The brush's stamp: offers its material to every cell of a placed tetrahex on the lattice.
     pub fn stamp_tetrahex(&mut self, t: &Placed, material: Material) {
         for y in 0..self.height() {
             for x in 0..self.width() {
                 if t.covers(x, y) {
-                    self.paint(x, y, material);
+                    self.offer(x, y, material);
+                }
+            }
+        }
+    }
+
+    /// The brush offers `material` to the cell: the offer waits on the cell until the cell is free
+    /// of contracts, then paints it (`settle`). A later offer replaces one still waiting.
+    fn offer(&mut self, x: i32, y: i32, material: Material) {
+        let i = (y * self.width() + x) as usize;
+        self.brush[i] = (material as u32 + 1) | BRUSH_WAIT << 8;
+    }
+
+    /// Settles the brush's waiting offers, before a phase: a cell that takes the offer now (free of
+    /// contracts, and holding what the brush may paint over) is painted and the offer is done;
+    /// otherwise the offer keeps waiting, for at most `BRUSH_WAIT` phases. Each offer paints its
+    /// cell at most once, so a stamp never paints more than its volume.
+    pub fn settle(&mut self) {
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let i = (y * self.width() + x) as usize;
+                let offer = self.brush[i];
+                if offer == 0 {
+                    continue;
+                }
+                let material = Material::ALL[((offer & 0xff) - 1) as usize];
+                if self.accepts(x, y, material) {
+                    self.set(x, y, State::holding(material));
+                    self.brush[i] = 0;
+                } else {
+                    let wait = (offer >> 8) - 1;
+                    self.brush[i] = if wait == 0 { 0 } else { (offer & 0xff) | wait << 8 };
                 }
             }
         }
     }
 }
+
+/// The most phases a brush offer waits on a cell engaged in a contract before it lapses. Air among
+/// air proposes nearly every phase, so it's engaged most of the time: three in four of its cells
+/// come free within 16 phases, nearly all within 64 (a quarter second at 240 phases a second).
+pub const BRUSH_WAIT: u32 = 96;
 
 /// The seven tetrahexes, by their usual names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -53,6 +53,9 @@ struct Stamp {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> cells: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read> stamps: array<Stamp>;
+// The brush's offers waiting on each cell (`World::brush`): 1 + a material in bits 0-7 (0: none),
+// the phases left to wait in bits 8-15.
+@group(0) @binding(3) var<storage, read_write> offers: array<u32>;
 
 const STATE_BITS: u32 = 20u;
 const STATE_MASK: u32 = 0xfffffu;
@@ -64,6 +67,7 @@ const VACUUM: u32 = 3u;
 const SLATE: u32 = 4u;
 const WATER: u32 = 5u;
 const SALT_EVALUATE: u32 = 1u;
+const BRUSH_WAIT: u32 = 96u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
 const SALT_REQUEST: u32 = 5u;
@@ -628,11 +632,8 @@ fn covers(stamp: Stamp, x: i32, y: i32) -> bool {
     return false;
 }
 
-// The brush (`brush`, `World::paint`), between phases: a particle is spawned only into a cell holding
-// insubstantial mass (air or vacuum; the air ceases to exist); erasing (vacuum) empties anything but
-// bedrock; a painted particle intends to move down. Cells engaged in a contract (an offer or a
-// request out, one awaiting its verdict, or a particle in transport) are left alone. Stamps apply
-// in order.
+// The brush (`brush`, `World::stamp`, `World::stamp_tetrahex`): each stamp offers its material to
+// the cells it covers; a later stamp's offer replaces an earlier one. The offers land in `settle`.
 @compute @workgroup_size(8, 8)
 fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = i32(id.x);
@@ -641,30 +642,47 @@ fn brush(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let i = y * params.width + x;
+    for (var s = 0u; s < params.stamps; s++) {
+        let stamp = stamps[s];
+        if covers(stamp, x, y) {
+            offers[i] = (stamp.material + 1u) | (BRUSH_WAIT << 8u);
+        }
+    }
+}
+
+// The brush's waiting offers settle before each phase (`World::settle`): a cell that takes the
+// offer now (`World::accepts`: free of contracts, an offer of a particle only into insubstantial
+// mass, air or vacuum; erasing empties anything but bedrock) is painted, holding a particle that
+// intends to move down, and the offer is done; otherwise it waits, for at most BRUSH_WAIT phases.
+@compute @workgroup_size(8, 8)
+fn settle(@builtin(global_invocation_id) id: vec3<u32>) {
+    let x = i32(id.x);
+    let y = i32(id.y);
+    if x >= params.width || y >= params.height {
+        return;
+    }
+    let i = y * params.width + x;
+    let offer = offers[i];
+    if offer == 0u {
+        return;
+    }
+    let material = (offer & 0xffu) - 1u;
     let parity = current(i);
     let now = load_state(i, parity);
     let kept = load_state(i, 1 - parity);
-    if now.offer != 0u || now.request != 0u || now.accept != 0u || kept.offer != 0u || kept.request != 0u {
-        return;
-    }
-    let word = atomicLoad(&cells[4 * i + parity]);
-    var here = now.material;
-    var painted = false;
-    for (var s = 0u; s < params.stamps; s++) {
-        let stamp = stamps[s];
-        let material = stamp.material;
-        // Insubstantial: air or vacuum (`Material::is_substantial`).
-        let insubstantial = here == AIR || here == VACUUM;
-        if covers(stamp, x, y) && here != material && here != BEDROCK && (material == VACUUM || insubstantial) {
-            here = material;
-            painted = true;
-        }
-    }
-    if painted {
-        var s = holding(here);
+    let engaged = now.offer != 0u || now.request != 0u || now.accept != 0u || kept.offer != 0u || kept.request != 0u;
+    let here = now.material;
+    let insubstantial = here == AIR || here == VACUUM;
+    if !engaged && here != material && here != BEDROCK && (material == VACUUM || insubstantial) {
+        let word = atomicLoad(&cells[4 * i + parity]);
+        var s = holding(material);
         // Painting keeps the cell's initialization (whether it waits).
         s.waits = (word >> 15u) & 1u;
         atomicStore(&cells[4 * i + parity], encode(s) | (word & ~STATE_MASK));
         atomicStore(&cells[4 * i + 2 + parity], encode_velocity(s.velocity));
+        offers[i] = 0u;
+    } else {
+        let wait = (offer >> 8u) - 1u;
+        offers[i] = select((offer & 0xffu) | (wait << 8u), 0u, wait == 0u);
     }
 }
