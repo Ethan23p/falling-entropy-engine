@@ -81,6 +81,12 @@ pub const ALL: &[Scene] = &[
         script: None,
     },
     Scene {
+        name: "silo-wider",
+        about: "the silo with a leak across most of its bottom",
+        build: Build::Code(|w| silo(w, Leak::BottomWider, Outside::Air)),
+        script: None,
+    },
+    Scene {
         name: "silo-side",
         about: "the silo with a leak in its side",
         build: Build::Code(|w| silo(w, Leak::Side, Outside::Air)),
@@ -155,6 +161,7 @@ fn packed_vacuum(world: &mut World) {
 enum Leak {
     BottomSmall,
     BottomLarge,
+    BottomWider,
     Side,
 }
 
@@ -208,6 +215,7 @@ fn silo(world: &mut World, leak: Leak, outside: Outside) {
     let holes: Vec<(i32, i32)> = match leak {
         Leak::BottomSmall => vec![(mid, bottom)],
         Leak::BottomLarge => (mid - 2..=mid + 2).map(|x| (x, bottom)).collect(),
+        Leak::BottomWider => (mid - 5..=mid + 5).map(|x| (x, bottom)).collect(),
         Leak::Side => vec![(right, bottom - 2), (right, bottom - 1)],
     };
     for (x, y) in holes {
