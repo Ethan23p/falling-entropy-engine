@@ -9,14 +9,17 @@ use crate::{Dir, Material, Velocity};
 ///
 /// - `offer`: an offer this cell authored, as origin, to the neighbor toward that direction. Its
 ///   particle is committed to it until the cell resolves it.
-/// - `accept` and `reject`: this cell's verdicts, as target, on the offers it evaluated: `accept`
-///   names the origin whose offer it accepted, and `reject` the origins whose offers it rejected
-///   (one bit per direction, `Dir as usize`). An offer with neither has no verdict yet. They answer
-///   requests the same way: `accept` names the requester this cell agreed to give its particle to.
+/// - `accept`, `wait` and `reject`: this cell's verdicts, as target, on the offers it evaluated:
+///   `accept` names the origin whose offer it accepted, `wait` the origin whose offer it keeps on the
+///   hook for one more phase, and `reject` the origins whose offers it rejected (one bit per
+///   direction, `Dir as usize`). An offer with none of them has no verdict yet. They answer requests
+///   the same way: `accept` names the requester this cell agreed to give its particle to.
 /// - `request`: a request this cell authored, as target, asking the neighbor toward that direction
 ///   to transfer its particle here. Its capacity is tied up in it until the cell resolves it.
 /// - `gives`: this cell accepted a request (`accept` names the requester): its particle is committed
 ///   to that transfer, in transport, until the cell resolves it.
+/// - `held`: this cell's `offer` was told to wait; it stands one more phase, its particle still
+///   committed, for the target's final verdict. It isn't a new offer, so no neighbor evaluates it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct State {
     pub material: Material,
@@ -26,9 +29,11 @@ pub struct State {
     pub reject: u8,
     pub request: Option<Dir>,
     pub gives: bool,
+    pub wait: Option<Dir>,
+    pub held: bool,
     /// Set only on initialization, by a coin flip: the cell lets its first phase pass before it
     /// offers, so cells don't all offer in step.
-    pub waits: bool,
+    pub delays: bool,
 }
 
 impl State {
@@ -40,21 +45,37 @@ impl State {
     /// A fresh particle that moves intends to move down.
     pub const fn holding(material: Material) -> State {
         let velocity = if material.moves() { Velocity::DOWN } else { Velocity::ZERO };
-        State { material, velocity, offer: None, accept: None, reject: 0, request: None, gives: false, waits: false }
+        State {
+            material,
+            velocity,
+            offer: None,
+            accept: None,
+            reject: 0,
+            request: None,
+            gives: false,
+            wait: None,
+            held: false,
+            delays: false,
+        }
     }
 
-    /// Bits 0-2 the material, 3-5 the offer and 6-8 the acceptance (1 + a direction, or 0 for
-    /// none), 9-14 the rejections, 15 whether it waits, 16-18 the request (as the offer), 19 whether
-    /// it gives. The velocity has a word of its own (`Velocity::encode`).
+    /// Bits 0-2 the material, 3-5 the offer and 6-8 the acceptance or the wait (1 + a direction, or
+    /// 0 for none), 9-14 the rejections, 15 whether it delays, 16-18 the request (as the offer), 19
+    /// whether it gives, 20 whether bits 6-8 name a wait rather than an acceptance, 21 whether its
+    /// offer is held. A cell waits on an offer only while its own resources are committed, so it
+    /// never accepts and waits at once. The velocity has a word of its own (`Velocity::encode`).
     pub fn encode(self) -> u32 {
+        debug_assert!(self.accept.is_none() || self.wait.is_none(), "accepts and waits at once: {self:?}");
         let dir = |d: Option<Dir>| d.map_or(0, |d| d as u32 + 1);
         self.material as u32
             | dir(self.offer) << 3
-            | dir(self.accept) << 6
+            | dir(self.accept.or(self.wait)) << 6
             | ((self.reject & 63) as u32) << 9
-            | (self.waits as u32) << 15
+            | (self.delays as u32) << 15
             | dir(self.request) << 16
             | (self.gives as u32) << 19
+            | (self.wait.is_some() as u32) << 20
+            | (self.held as u32) << 21
     }
 
     /// Whether this cell rejected the offer from the neighbor toward `d`.
@@ -67,15 +88,19 @@ impl State {
             0 | 7 => None,
             n => Some(Dir::ALL[n as usize - 1]),
         };
+        let waits = bits >> 20 & 1 == 1;
+        let named = dir(bits >> 6);
         State {
             material: Material::decode(bits & 7),
             velocity: Velocity::decode(velocity),
             offer: dir(bits >> 3),
-            accept: dir(bits >> 6),
+            accept: if waits { None } else { named },
             reject: (bits >> 9 & 63) as u8,
-            waits: bits >> 15 & 1 == 1,
+            delays: bits >> 15 & 1 == 1,
             request: dir(bits >> 16),
             gives: bits >> 19 & 1 == 1,
+            wait: if waits { named } else { None },
+            held: bits >> 21 & 1 == 1,
         }
     }
 

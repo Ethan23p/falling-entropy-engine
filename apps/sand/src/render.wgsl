@@ -31,8 +31,8 @@ struct View {
 
 // Four words a cell; the first two are its state words: the state (bits 0-19) and its phase
 // (bits 20-31). See sim.wgsl.
-const STATE_BITS: u32 = 20u;
-const PHASE_MASK: u32 = 0xfffu;
+const STATE_BITS: u32 = 22u;
+const PHASE_MASK: u32 = 0x3ffu;
 const SQRT3: f32 = 1.7320508;
 
 // The index of cell i's current word, of the two it keeps: the one tagged with the later phase.

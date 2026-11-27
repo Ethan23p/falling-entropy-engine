@@ -3,13 +3,15 @@
 // identical; the GPU parity test checks them bit for bit.
 //
 // A cell keeps four words: per phase parity, a state word and a velocity word. Word 4i + (p & 1)
-// holds cell i's state at phase p (bits 0-19) and p itself (bits 20-31, wrapping); word
+// holds cell i's state at phase p (bits 0-21) and p itself (bits 22-31, wrapping); word
 // 4i + 2 + (p & 1) holds its velocity then. A neighbor at phase p reads those words, which the cell
 // doesn't overwrite until it reaches p + 2, so cells run in any order and in place.
 // A state (`State::encode`): what the cell holds in bits 0-2 (0 air, 1 sand, 2 bedrock,
-// 3 vacuum: nothing, 4 slate, 5 water), the offer in bits 3-5 and the acceptance in bits 6-8
-// (1 + a direction, or 0 for none), the rejections in bits 9-14 (one per direction), in bit 15 whether it waits (set
-// only on initialization), the request in bits 16-18 (as the offer), and in bit 19 whether it gives. A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
+// 3 vacuum: nothing, 4 slate, 5 water), the offer in bits 3-5 and the acceptance or the wait in
+// bits 6-8 (1 + a direction, or 0 for none), the rejections in bits 9-14 (one per direction), in
+// bit 15 whether it delays (set only on initialization), the request in bits 16-18 (as the offer),
+// in bit 19 whether it gives, in bit 20 whether bits 6-8 name a wait, and in bit 21 whether its
+// offer is held. A velocity (`Velocity::encode`): x in the low 16 bits, y in the high, both signed.
 // Outside the lattice reads as bedrock.
 // Directions, clockwise from up: 0 up, 1 up-right, 2 down-right, 3 down, 4 down-left, 5 up-left.
 
@@ -57,9 +59,9 @@ struct Stamp {
 // the phases left to wait in bits 8-15.
 @group(0) @binding(3) var<storage, read_write> offers: array<u32>;
 
-const STATE_BITS: u32 = 20u;
-const STATE_MASK: u32 = 0xfffffu;
-const PHASE_MASK: u32 = 0xfffu;
+const STATE_BITS: u32 = 22u;
+const STATE_MASK: u32 = 0x3fffffu;
+const PHASE_MASK: u32 = 0x3ffu;
 const AIR: u32 = 0u;
 const SAND: u32 = 1u;
 const BEDROCK: u32 = 2u;
@@ -71,6 +73,7 @@ const BRUSH_WAIT: u32 = 96u;
 const SALT_PROPOSE: u32 = 2u;
 const SALT_DEFLECT: u32 = 3u;
 const SALT_REQUEST: u32 = 5u;
+const SALT_HOLD: u32 = 6u;
 const INTO_CAP: u32 = 255u;
 const MASS_CAP: u32 = 16u;
 const WEIGHT_TOP: u32 = 65536u;
@@ -137,10 +140,13 @@ struct State {
     accept: u32,
     // One bit per direction.
     reject: u32,
-    waits: u32,
+    delays: u32,
     // 1 + a direction, or 0 for none.
     request: u32,
     gives: u32,
+    // 1 + a direction, or 0 for none: the offer kept on the hook.
+    wait: u32,
+    held: u32,
 }
 
 // `Material::decode`: the codes past water read as vacuum.
@@ -163,12 +169,18 @@ fn decode(bits: u32, v: u32) -> State {
     if request == 7u {
         request = 0u;
     }
-    return State(material, velocity, offer, accept, (bits >> 9u) & 63u, (bits >> 15u) & 1u, request, (bits >> 19u) & 1u);
+    var wait = 0u;
+    if ((bits >> 20u) & 1u) == 1u {
+        wait = accept;
+        accept = 0u;
+    }
+    return State(material, velocity, offer, accept, (bits >> 9u) & 63u, (bits >> 15u) & 1u, request, (bits >> 19u) & 1u,
+        wait, (bits >> 21u) & 1u);
 }
 
 fn encode(s: State) -> u32 {
-    return s.material | (s.offer << 3u) | (s.accept << 6u) | ((s.reject & 63u) << 9u) | ((s.waits & 1u) << 15u)
-        | (s.request << 16u) | ((s.gives & 1u) << 19u);
+    return s.material | (s.offer << 3u) | ((s.accept | s.wait) << 6u) | ((s.reject & 63u) << 9u) | ((s.delays & 1u) << 15u)
+        | (s.request << 16u) | ((s.gives & 1u) << 19u) | (u32(s.wait != 0u) << 20u) | ((s.held & 1u) << 21u);
 }
 
 fn encode_velocity(v: vec2<i32>) -> u32 {
@@ -181,7 +193,7 @@ fn holding(m: u32) -> State {
     if moves(m) {
         v = vec2(0, SCALE);
     }
-    return State(m, v, 0u, 0u, 0u, 0u, 0u, 0u);
+    return State(m, v, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
 }
 
 // Particle (`particle`): `Material::is_particle`, `is_substantial`, `is_static`, `moves`.
@@ -337,6 +349,16 @@ fn accepted(d: u32, dest: State) -> bool {
     return dest.accept == opposite(d) + 1u;
 }
 
+// Told to wait: the target's wait names this cell.
+fn waited(d: u32, dest: State) -> bool {
+    return dest.wait == opposite(d) + 1u;
+}
+
+// An offer into me from the neighbor toward d: a new one, not held.
+fn offers_me(d: u32, other: State) -> bool {
+    return other.offer == opposite(d) + 1u && other.held == 0u;
+}
+
 fn rejected(d: u32, dest: State) -> bool {
     return ((dest.reject >> opposite(d)) & 1u) == 1u;
 }
@@ -428,12 +450,15 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     live.reject = 0u;
     live.request = 0u;
     live.gives = 0u;
+    live.wait = 0u;
+    live.held = 0u;
     var standing = false;
 
     // Resolve: a particle given to a requester leaves (air spawns a new air). The offer kept back,
     // with its verdict if it has one: apply the contract's effect on its origin. The request kept
     // back likewise on its target, unless matched by the origin's offer, which I accepted. With no
-    // verdict yet, a contract stands: publish it again.
+    // verdict yet, a contract stands: publish it again. Told to wait, the offer is held: it stands
+    // one more phase. A held offer is resolved from my own published state.
     if me.gives == 1u {
         if is_substantial(me.material) {
             release(&live);
@@ -441,18 +466,30 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
             spawn(&live);
         }
     }
-    if kept.offer != 0u {
-        let d = kept.offer - 1u;
+    var out = 0u;
+    var origin = kept;
+    if me.held == 1u {
+        out = me.offer;
+        origin = me;
+    } else if kept.held == 0u {
+        out = kept.offer;
+    }
+    if out != 0u {
+        let d = out - 1u;
         if accepted(d, (*seen)[d]) {
-            if is_substantial(kept.material) {
+            if is_substantial(origin.material) {
                 release(&live);
             } else {
                 spawn(&live);
             }
+        } else if waited(d, (*seen)[d]) {
+            live.offer = out;
+            live.held = 1u;
+            standing = true;
         } else if rejected(d, (*seen)[d]) {
             deflect(&live, d, hash(x, y, phase, SALT_DEFLECT));
         } else {
-            live.offer = kept.offer;
+            live.offer = out;
             standing = true;
         }
     } else if kept.request != 0u && me.accept != kept.request {
@@ -464,19 +501,26 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
             standing = true;
         }
     }
-    // An offer or a request out, or standing, ties up my particle or my capacity.
-    let committed = me.offer != 0u || me.request != 0u || standing;
+    // An offer or a request out, or standing, ties up my particle or my capacity. A held offer is
+    // resolved now.
+    let committed = (me.offer != 0u && me.held == 0u) || me.request != 0u || standing;
 
     // Evaluate: the contracts that target me (offers into me, requests for my particle), excluded
     // unless the physics distribution entertains them, the rest weighted; the one selected is
     // accepted, tying up what it deals in. While contracts remain I select again, from those my
-    // resources still entertain. Every contract evaluated gets a verdict: accepted, or rejected. A
-    // matched pair is accepted automatically, first.
+    // resources still entertain. Every contract evaluated gets a verdict: accepted, waited, or rejected. A
+    // matched pair is accepted automatically, first; or rather, the offer I kept on the hook, if my
+    // resources entertain it now. Committed, I keep one offer on the hook instead of accepting, from
+    // those the capacity my contract may free would entertain, and reject the rest.
     {
+        var mine_out = 0u;
+        if me.held == 0u {
+            mine_out = me.offer;
+        }
         var asked = 0u;
         for (var d = 0u; d < 6u; d++) {
             let other = (*seen)[d];
-            if other.offer == opposite(d) + 1u || (other.request == opposite(d) + 1u && me.offer != d + 1u) {
+            if offers_me(d, other) || (other.request == opposite(d) + 1u && mine_out != d + 1u) || me.wait == d + 1u {
                 asked |= 1u << d;
             }
         }
@@ -486,9 +530,16 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
         if me.request != 0u {
             let d = me.request - 1u;
             let origin = (*seen)[d];
-            if origin.offer == opposite(d) + 1u && entertains(origin.material, live.material, false) {
+            if offers_me(d, origin) && entertains(origin.material, live.material, false) {
                 next_pick = me.request;
             }
+        }
+        var waited_pick = 0u;
+        if me.wait != 0u && entertains((*seen)[me.wait - 1u].material, live.material, tied) {
+            waited_pick = me.wait;
+        }
+        if waited_pick != 0u {
+            next_pick = waited_pick;
         }
         for (var round = 0u; round < 6u; round++) {
             var i = next_pick;
@@ -497,10 +548,10 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
                 var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
                 for (var d = 0u; d < 6u; d++) {
                     let other = (*seen)[d];
-                    if (((asked & ~taken) >> d) & 1u) == 0u {
+                    if (((asked & ~taken) >> d) & 1u) == 0u || me.wait == d + 1u {
                         continue;
                     }
-                    if other.offer == opposite(d) + 1u {
+                    if offers_me(d, other) {
                         if entertains(other.material, live.material, tied) {
                             weights[d] = max(weight(other.material, other.velocity, opposite(d), live.material), 1u);
                         }
@@ -515,12 +566,31 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
             }
             let d = i - 1u;
             taken |= 1u << d;
-            if (*seen)[d].offer == opposite(d) + 1u {
+            if me.wait == d + 1u || offers_me(d, (*seen)[d]) {
                 receive(&live, d, (*seen)[d]);
             } else {
                 give(&live, d);
             }
             tied = true;
+        }
+        if committed && live.accept == 0u {
+            // `freed`: what my capacity holds once my contract settles, if it frees.
+            var freed = live.material;
+            let offering = live.offer != 0u || (me.offer != 0u && me.held == 0u);
+            if offering && is_substantial(live.material) {
+                freed = VACUUM;
+            }
+            var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+            for (var d = 0u; d < 6u; d++) {
+                let other = (*seen)[d];
+                if (((asked & ~taken) >> d) & 1u) == 1u && offers_me(d, other) && entertains(other.material, freed, false) {
+                    weights[d] = max(weight(other.material, other.velocity, opposite(d), freed), 1u);
+                }
+            }
+            live.wait = select_from(&weights, hash(x, y, phase, SALT_HOLD));
+            if live.wait != 0u {
+                taken |= 1u << (live.wait - 1u);
+            }
         }
         live.reject = asked & ~taken;
     }
@@ -531,8 +601,8 @@ fn next(me: State, kept: State, seen: ptr<function, array<State, 6>>, x: i32, y:
     // Propose: one phase in request_odds a request, from the neighbors whose particle I have room
     // for, by how strongly its velocity points at me; otherwise an offer, from the six neighbors,
     // excluding those it wouldn't offer to, weighted.
-    live.waits = 0u;
-    if !committed && me.waits == 0u && live.gives == 0u {
+    live.delays = 0u;
+    if !committed && me.delays == 0u && live.gives == 0u {
         var weights = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
         if requests(hash(x, y, phase, SALT_REQUEST)) {
             for (var d = 0u; d < 6u; d++) {
@@ -670,14 +740,15 @@ fn settle(@builtin(global_invocation_id) id: vec3<u32>) {
     let parity = current(i);
     let now = load_state(i, parity);
     let kept = load_state(i, 1 - parity);
-    let engaged = now.offer != 0u || now.request != 0u || now.accept != 0u || kept.offer != 0u || kept.request != 0u;
+    let engaged = now.offer != 0u || now.request != 0u || now.accept != 0u || now.wait != 0u || kept.offer != 0u
+        || kept.request != 0u;
     let here = now.material;
     let insubstantial = here == AIR || here == VACUUM;
     if !engaged && here != material && here != BEDROCK && (material == VACUUM || insubstantial) {
         let word = atomicLoad(&cells[4 * i + parity]);
         var s = holding(material);
-        // Painting keeps the cell's initialization (whether it waits).
-        s.waits = (word >> 15u) & 1u;
+        // Painting keeps the cell's initialization (whether it delays).
+        s.delays = (word >> 15u) & 1u;
         atomicStore(&cells[4 * i + parity], encode(s) | (word & ~STATE_MASK));
         atomicStore(&cells[4 * i + 2 + parity], encode_velocity(s.velocity));
         offers[i] = 0u;
