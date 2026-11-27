@@ -37,18 +37,14 @@ struct Params {
     materials: array<Properties, 6>,
 }
 
-// A brush stamp (`gpu::Stamp`): its kind (0 a disc, 1 a tetrahex), its material (as encoded); a
-// disc's radius and centre (cell units, x and the half-cell-shifted y); a tetrahex's superhex
-// radius and the axial centres of its four superhexes (`Placed`).
+// A brush stamp (`gpu::Stamp`): its kind (0 a disc, 1 a polyhex) and material (as encoded). A
+// disc's words: its radius, then its centre in cell units (x and the half-cell-shifted y) in words
+// 2 and 3. A polyhex's (`Placed`): its threshold in words 0, 1 and 5, its axial origin in 2 and 3,
+// its pieces in 4, and its pieces' centres, relative to the origin.
 struct Stamp {
     kind: u32,
     material: u32,
-    radius: f32,
-    hex_radius: i32,
-    x: f32,
-    y: f32,
-    _pad0: u32,
-    _pad1: u32,
+    w: array<u32, 6>,
     centres: array<vec2<i32>, 4>,
 }
 
@@ -677,29 +673,48 @@ fn step(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicStore(&cells[4 * i + 3 - parity], encode_velocity(s.velocity));
 }
 
-// Axial coordinates (`lattice::to_axial`) and steps between cells (`hex_distance`).
+// Axial coordinates (`lattice::to_axial`).
 fn to_axial(x: i32, y: i32) -> vec2<i32> {
     return vec2(x, y - (x - (x & 1)) / 2);
 }
 
-fn hex_distance(a: vec2<i32>, b: vec2<i32>) -> i32 {
-    let d = a - b;
-    return (abs(d.x) + abs(d.y) + abs(d.x + d.y)) / 2;
+
+// A cell's key against a polyhex's centres (`brush::key`), at axial offset `a` from its origin, as
+// (hex distance doubled, squared straight-line distance, tie-break).
+fn shape_key(centres: array<vec2<i32>, 4>, pieces: u32, a: vec2<i32>) -> vec3<u32> {
+    var c = centres;
+    var hex = 0xffffffffu;
+    var line = 0xffffffffu;
+    for (var k = 0u; k < pieces; k++) {
+        let d = a - c[k];
+        let h = u32(abs(d.x) + abs(d.y) + abs(d.x + d.y));
+        let l = u32(d.x * d.x + d.x * d.y + d.y * d.y);
+        if h < hex || (h == hex && l < line) {
+            hex = h;
+            line = l;
+        }
+    }
+    let tie = (hash(a.x, a.y, 0u, SALT_TIE) & 0xffffu) << 16u | u32(a.x & 255) << 8u | u32(a.y & 255);
+    return vec3(hex, line, tie);
 }
+
+// Whether key `k` is at most `t`, word by word.
+fn key_le(k: vec3<u32>, t: vec3<u32>) -> bool {
+    return k.x < t.x || (k.x == t.x && (k.y < t.y || (k.y == t.y && k.z <= t.z)));
+}
+
+const SALT_TIE: u32 = 0x7e7bu;
 
 // Whether the stamp covers cell (x, y): `World::stamp`'s disc of centres, or `Placed::covers`.
 fn covers(stamp: Stamp, x: i32, y: i32) -> bool {
     if stamp.kind == 0u {
-        let off = vec2(f32(x), f32(y) + 0.5 * f32(x & 1)) - vec2(stamp.x, stamp.y);
-        return off.x * off.x + off.y * off.y <= stamp.radius * stamp.radius;
+        let radius = bitcast<f32>(stamp.w[0]);
+        let off = vec2(f32(x), f32(y) + 0.5 * f32(x & 1)) - bitcast<vec2<f32>>(vec2(stamp.w[2], stamp.w[3]));
+        return off.x * off.x + off.y * off.y <= radius * radius;
     }
-    let p = to_axial(x, y);
-    for (var k = 0; k < 4; k++) {
-        if hex_distance(p, stamp.centres[k]) <= stamp.hex_radius {
-            return true;
-        }
-    }
-    return false;
+    let a = to_axial(x, y) - bitcast<vec2<i32>>(vec2(stamp.w[2], stamp.w[3]));
+    let k = shape_key(stamp.centres, stamp.w[4], a);
+    return key_le(k, vec3(stamp.w[0], stamp.w[1], stamp.w[5]));
 }
 
 // The brush (`brush`, `World::stamp`, `World::stamp_tetrahex`): each stamp offers its material to

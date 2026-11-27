@@ -207,7 +207,7 @@ fn brush_paints_only_into_insubstantial_mass() {
     assert_eq!(w.material(3, 2), Material::Water, "air does not replace water");
 }
 
-/// Every cell a placed tetrahex covers, as a sorted set.
+/// Every cell a placed polyhex covers, as a sorted set.
 fn cover(t: &Placed) -> Vec<(i32, i32)> {
     let mut cells = t.cells();
     cells.sort();
@@ -233,14 +233,25 @@ fn connected(cells: &[(i32, i32)]) -> bool {
 }
 
 #[test]
-fn brush_tetrahexes_are_the_seven() {
-    // Up to turns and mirroring, the seven shapes are distinct, and each is four joined hexes.
-    let canonical = |shape| {
+fn brush_polyhexes_are_the_twelve() {
+    // Up to turns and mirroring, the twelve shapes are distinct, and each is joined hexes: one
+    // monohex, one dihex, three trihexes, seven tetrahexes.
+    let canonical = |shape: Polyhex| {
         let mut forms: Vec<Vec<(i32, i32)>> = (0..12)
             .map(|k| {
-                let c = cover(&Placed::new(shape, k % 6, k >= 6, 0, (0, 0)));
-                let (mq, mr) = c.iter().map(|&(x, y)| to_axial(x, y)).min().unwrap();
-                let mut c: Vec<_> = c.iter().map(|&(x, y)| to_axial(x, y)).map(|(q, r)| (q - mq, r - mr)).collect();
+                let mut c: Vec<(i32, i32)> = shape
+                    .hexes()
+                    .into_iter()
+                    .map(|h| {
+                        let mut h = if k >= 6 { (h.1, h.0) } else { h };
+                        for _ in 0..k % 6 {
+                            h = (-h.1, h.0 + h.1);
+                        }
+                        h
+                    })
+                    .collect();
+                let (mq, mr) = *c.iter().min().unwrap();
+                c = c.iter().map(|&(q, r)| (q - mq, r - mr)).collect();
                 c.sort();
                 c
             })
@@ -248,36 +259,61 @@ fn brush_tetrahexes_are_the_seven() {
         forms.sort();
         forms[0].clone()
     };
-    let mut all: Vec<_> = Tetrahex::ALL.iter().map(|&s| canonical(s)).collect();
-    for &s in &Tetrahex::ALL {
-        let c = cover(&Placed::new(s, 0, false, 0, (5, 5)));
-        assert_eq!(c.len(), 4, "{s:?}");
-        assert!(connected(&c), "{s:?}");
+    let mut all: Vec<_> = Polyhex::ALL.iter().map(|&s| canonical(s)).collect();
+    let mut counts = [0; 5];
+    for &s in &Polyhex::ALL {
+        let cells: Vec<(i32, i32)> = s.hexes().into_iter().map(|(q, r)| from_axial(q + 10, r + 10)).collect();
+        assert!(connected(&cells), "{s:?}");
+        counts[cells.len()] += 1;
     }
-    all.dedup();
+    assert_eq!(counts, [0, 1, 1, 3, 7]);
     all.sort();
     all.dedup();
-    assert_eq!(all.len(), 7);
+    assert_eq!(all.len(), 12);
 }
 
 #[test]
-fn brush_tetrahex_volume_is_normalized() {
+fn brush_volume_is_normalized() {
     // At every size, every shape in every orientation covers the same number of cells, in one piece.
-    for radius in 0..6 {
-        let want = 4 * (3 * radius * radius + 3 * radius + 1) as usize;
-        for &s in &Tetrahex::ALL {
+    for size in (0..7).chain([10, MAX_SIZE]) {
+        let want = 4 * (3 * size * size + 3 * size + 1) as usize;
+        for &s in &Polyhex::ALL {
             for k in 0..12 {
-                let t = Placed::new(s, k % 6, k >= 6, radius, (40, 40));
+                if size > 6 && k > 1 {
+                    continue;
+                }
+                let t = Placed::new(s, k % 6, k >= 6, size, (40, 40));
                 let c = cover(&t);
-                assert_eq!((c.len(), t.volume()), (want, want), "{s:?} turn {k} radius {radius}");
-                assert!(connected(&c), "{s:?} turn {k} radius {radius}");
+                assert_eq!((c.len(), t.volume()), (want, want), "{s:?} turn {k} size {size}");
+                assert!(connected(&c), "{s:?} turn {k} size {size}");
             }
         }
     }
 }
 
 #[test]
-fn brush_tetrahex_is_centred_where_placed() {
+fn brush_tetrahexes_are_superhexes_at_whole_sizes() {
+    // A tetrahex at size R is four hexes of radius R, which tile exactly: the four superhexes.
+    for size in 0..4 {
+        for &s in &Polyhex::ALL[5..] {
+            let t = Placed::new(s, 0, false, size, (40, 40));
+            let centres: Vec<(i32, i32)> = t.centres.to_vec();
+            let mut want: Vec<(i32, i32)> = Vec::new();
+            for &(cq, cr) in &centres {
+                for dq in -size..=size {
+                    for dr in (-size).max(-dq - size)..=size.min(-dq + size) {
+                        want.push(from_axial(t.origin.0 + cq + dq, t.origin.1 + cr + dr));
+                    }
+                }
+            }
+            want.sort();
+            assert_eq!(cover(&t), want, "{s:?} size {size}");
+        }
+    }
+}
+
+#[test]
+fn brush_shape_is_centred_where_placed() {
     for radius in 0..5 {
         for seed in 0..40 {
             let t = Placed::random(seed, radius, (30, 30));
@@ -291,17 +327,17 @@ fn brush_tetrahex_is_centred_where_placed() {
 }
 
 #[test]
-fn brush_stamp_tetrahex_paints_what_it_covers() {
+fn brush_stamp_polyhex_paints_what_it_covers() {
     let mut w = World::new(20, 20);
-    let t = Placed::new(Tetrahex::Wave, 1, false, 1, (10, 10));
-    w.stamp_tetrahex(&t, Material::Sand);
+    let t = Placed::new(Polyhex::Wave, 1, false, 1, (10, 10));
+    w.stamp_polyhex(&t, Material::Sand);
     w.settle();
     let mut want: Vec<_> = cover(&t);
     want.sort_by_key(|&(x, y)| (y, x));
     assert_eq!(sand_at(&w), want);
     // Off the edge, it paints what lies on the lattice.
     let mut w = World::new(6, 6);
-    w.stamp_tetrahex(&Placed::new(Tetrahex::Bar, 0, false, 2, (0, 0)), Material::Water);
+    w.stamp_polyhex(&Placed::new(Polyhex::Bar, 0, false, 2, (0, 0)), Material::Water);
     w.settle();
     assert!(w.count(Material::Water) > 0 && w.count(Material::Water) < 76);
 }
@@ -1259,8 +1295,8 @@ fn brush_offer_waits_for_air_busy_in_a_contract() {
         for _ in 0..50 {
             w.step();
         }
-        let t = Placed::new(Tetrahex::Bee, 0, false, 3, (20, 20));
-        w.stamp_tetrahex(&t, Material::Sand);
+        let t = Placed::new(Polyhex::Bee, 0, false, 3, (20, 20));
+        w.stamp_polyhex(&t, Material::Sand);
         w.settle();
         let at_once = w.count(Material::Sand);
         for _ in 0..BRUSH_WAIT {

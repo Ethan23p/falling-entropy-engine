@@ -15,14 +15,15 @@ struct View {
     origin: vec2<f32>,
     // How dark hex edges draw, 0 to 1.
     edges: f32,
-    // The ghost: the brush's pending stamp (`Placed`), its superhex radius (-1: none) and material.
-    ghost_radius: i32,
+    // The ghost: the brush's pending stamp (`Placed`), its pieces (0: none) and material.
+    ghost_pieces: u32,
     ghost_material: u32,
     // 1: cells draw as square bricks, 2 across, in the same column-offset pattern.
     bricks: u32,
-    _pad1: u32,
-    _pad2: u32,
-    // Each centre in .xy (a uniform array's stride is 16 bytes).
+    // The ghost's threshold, its last word in ghost[1].z.
+    threshold0: u32,
+    threshold1: u32,
+    // Each centre in .xy (a uniform array's stride is 16 bytes); the origin in ghost[0].zw.
     ghost: array<vec4<i32>, 4>,
 }
 
@@ -74,9 +75,37 @@ fn round_axial(q: f32, r: f32) -> vec2<i32> {
     return vec2(i32(rq), i32(rr));
 }
 
-fn hex_distance(a: vec2<i32>, b: vec2<i32>) -> i32 {
-    let d = a - b;
-    return (abs(d.x) + abs(d.y) + abs(d.x + d.y)) / 2;
+// The sim's hash (`random::hash`), for the ghost's tie-break; `mix` is a built-in here.
+fn scramble(v0: u32) -> u32 {
+    var v = v0;
+    v ^= v >> 16u;
+    v *= 0x7feb352du;
+    v ^= v >> 15u;
+    v *= 0x846ca68bu;
+    return v ^ (v >> 16u);
+}
+
+fn hash(x: i32, y: i32, phase: u32, salt: u32) -> u32 {
+    return scramble(u32(x) ^ scramble(u32(y) ^ scramble(phase ^ scramble(salt))));
+}
+
+// Whether the cell at axial `p` is under the ghost (`Placed::covers`, as the sim's `covers`).
+fn under_ghost(p: vec2<i32>) -> bool {
+    let a = p - view.ghost[0].zw;
+    var hex = 0xffffffffu;
+    var line = 0xffffffffu;
+    for (var k = 0u; k < view.ghost_pieces; k++) {
+        let d = a - view.ghost[k].xy;
+        let h = u32(abs(d.x) + abs(d.y) + abs(d.x + d.y));
+        let l = u32(d.x * d.x + d.x * d.y + d.y * d.y);
+        if h < hex || (h == hex && l < line) {
+            hex = h;
+            line = l;
+        }
+    }
+    let tie = (hash(a.x, a.y, 0u, 0x7e7bu) & 0xffffu) << 16u | u32(a.x & 255) << 8u | u32(a.y & 255);
+    let t = vec3(view.threshold0, view.threshold1, u32(view.ghost[1].z));
+    return hex < t.x || (hex == t.x && (line < t.y || (line == t.y && tie <= t.z)));
 }
 
 @vertex
@@ -124,14 +153,8 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
 
     // The ghost: the brush's pending stamp, washed toward its material and lightened.
-    if view.ghost_radius >= 0 {
-        var under = false;
-        for (var k = 0; k < 4; k++) {
-            under = under || hex_distance(a, view.ghost[k].xy) <= view.ghost_radius;
-        }
-        if under {
-            c = mix(c, color(view.ghost_material), 0.6) + vec3(0.12);
-        }
+    if view.ghost_pieces > 0u && under_ghost(a) {
+        c = mix(c, color(view.ghost_material), 0.6) + vec3(0.12);
     }
     return vec4(c, 1.0);
 }

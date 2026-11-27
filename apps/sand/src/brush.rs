@@ -3,7 +3,7 @@
 //! short delay, confirms the same shape again and again; a second press anywhere, a right click
 //! or the platform taking the pointer cancels it. The shapes themselves are `sim::Placed`.
 
-use sim::{Placed, to_axial};
+use sim::Placed;
 
 #[derive(Default)]
 pub struct Brush {
@@ -20,12 +20,6 @@ struct Press {
     /// When it went down, in seconds, and how many times holding has confirmed it.
     since: f32,
     repeats: u32,
-}
-
-/// The ghost moved from cell `from` to cell `to`: the same shape, translated.
-fn shifted(p: Placed, from: (i32, i32), to: (i32, i32)) -> Placed {
-    let (a, b) = (to_axial(from.0, from.1), to_axial(to.0, to.1));
-    Placed { centres: p.centres.map(|(q, r)| (q + b.0 - a.0, r + b.1 - a.1)), ..p }
 }
 
 impl Brush {
@@ -45,7 +39,7 @@ impl Brush {
 
     pub fn moved(&mut self, id: u64, cell: (i32, i32)) {
         if let Some(p) = self.press.as_mut().filter(|p| p.id == id) {
-            p.placed = shifted(p.placed, p.cell, cell);
+            p.placed = p.placed.moved_to(cell);
             p.cell = cell;
         }
     }

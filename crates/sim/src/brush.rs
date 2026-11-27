@@ -1,11 +1,10 @@
 //! The brush: the player's input, and the only thing that spawns or erases particles. It works
 //! between phases and keeps clear of cells engaged in a contract, so it never breaks one.
 //!
-//! It stamps tetrahexes: four hexes joined edge to edge, in one of seven shapes. A larger size
-//! makes each of the four a hex of that radius (a superhex), and those tile the lattice exactly,
-//! so every shape at a size covers the same number of cells: the volume is normalized.
+//! It stamps polyhexes: one to four hexes joined edge to edge, in one of twelve shapes. Each is
+//! scaled so every shape at a size covers the same number of cells: the volume is normalized.
 
-use crate::lattice::{from_axial, hex_distance, to_axial};
+use crate::lattice::{from_axial, to_axial};
 use crate::{Material, State, World};
 
 impl World {
@@ -43,7 +42,7 @@ impl World {
     }
 
     /// The brush's stamp: offers its material to every cell of a placed tetrahex on the lattice.
-    pub fn stamp_tetrahex(&mut self, t: &Placed, material: Material) {
+    pub fn stamp_polyhex(&mut self, t: &Placed, material: Material) {
         for y in 0..self.height() {
             for x in 0..self.width() {
                 if t.covers(x, y) {
@@ -90,9 +89,19 @@ impl World {
 /// come free within 16 phases, nearly all within 64 (a quarter second at 240 phases a second).
 pub const BRUSH_WAIT: u32 = 96;
 
-/// The seven tetrahexes, by their usual names.
+/// The twelve polyhexes of one to four hexes: every shape of hexes joined edge to edge, up to turns
+/// and mirroring.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tetrahex {
+pub enum Polyhex {
+    Hex,
+    Pair,
+    /// Three around a corner.
+    Triangle,
+    /// Three with a bend.
+    Bend,
+    /// Three in a row.
+    Line,
+    // The seven tetrahexes, by their usual names.
     Bee,
     Bar,
     Pistol,
@@ -107,103 +116,185 @@ fn turn((q, r): (i32, i32)) -> (i32, i32) {
     (-r, q + r)
 }
 
-impl Tetrahex {
-    pub const ALL: [Tetrahex; 7] = [
-        Tetrahex::Bee,
-        Tetrahex::Bar,
-        Tetrahex::Pistol,
-        Tetrahex::Propeller,
-        Tetrahex::Worm,
-        Tetrahex::Arch,
-        Tetrahex::Wave,
+impl Polyhex {
+    pub const ALL: [Polyhex; 12] = [
+        Polyhex::Hex,
+        Polyhex::Pair,
+        Polyhex::Triangle,
+        Polyhex::Bend,
+        Polyhex::Line,
+        Polyhex::Bee,
+        Polyhex::Bar,
+        Polyhex::Pistol,
+        Polyhex::Propeller,
+        Polyhex::Worm,
+        Polyhex::Arch,
+        Polyhex::Wave,
     ];
 
-    /// Its four hexes in axial coordinates, built from three neighbor steps a sixth of a turn
-    /// apart: `a` down-right, `b` down, `c` down-left.
-    pub fn hexes(self) -> [(i32, i32); 4] {
+    /// Its hexes in axial coordinates, built from three neighbor steps a sixth of a turn apart:
+    /// `a` down-right, `b` down, `c` down-left.
+    pub fn hexes(self) -> Vec<(i32, i32)> {
         let (a, b, c) = ((1, 0), (0, 1), (-1, 1));
         let add = |p: (i32, i32), q: (i32, i32)| (p.0 + q.0, p.1 + q.1);
         let o = (0, 0);
         match self {
+            Polyhex::Hex => vec![o],
+            Polyhex::Pair => vec![o, a],
+            Polyhex::Triangle => vec![o, a, b],
+            Polyhex::Bend => vec![o, a, add(a, b)],
+            Polyhex::Line => vec![o, a, add(a, a)],
             // Two touching triangles: every hex touches two or three others.
-            Tetrahex::Bee => [o, a, b, add(a, b)],
-            Tetrahex::Bar => [o, a, add(a, a), add(add(a, a), a)],
+            Polyhex::Bee => vec![o, a, b, add(a, b)],
+            Polyhex::Bar => vec![o, a, add(a, a), add(add(a, a), a)],
             // A triangle with a bar off one corner.
-            Tetrahex::Pistol => [o, a, b, add(a, a)],
+            Polyhex::Pistol => vec![o, a, b, add(a, a)],
             // One hex with three arms, every other side.
-            Tetrahex::Propeller => [o, a, c, (0, -1)],
+            Polyhex::Propeller => vec![o, a, c, (0, -1)],
             // A bar of three, then a bend.
-            Tetrahex::Worm => [o, a, add(a, a), add(add(a, a), b)],
+            Polyhex::Worm => vec![o, a, add(a, a), add(add(a, a), b)],
             // Two bends the same way.
-            Tetrahex::Arch => [o, a, add(a, b), add(add(a, b), c)],
+            Polyhex::Arch => vec![o, a, add(a, b), add(add(a, b), c)],
             // Two bends, opposite ways.
-            Tetrahex::Wave => [o, a, add(a, b), add(add(a, b), a)],
+            Polyhex::Wave => vec![o, a, add(a, b), add(add(a, b), a)],
         }
     }
 }
 
-/// A tetrahex as the brush stamps it: the centres of its four superhexes (axial coordinates on the
-/// lattice) and their radius. It covers `Placed::volume` cells.
+/// The brush's volume at a size: four hexes of radius `size` (`4 (3 R^2 + 3 R + 1)` cells), the
+/// size of a tetrahex made of four superhexes. Every shape at a size covers this many cells.
+pub fn volume(size: i32) -> u32 {
+    let r = size.clamp(0, MAX_SIZE) as u32;
+    4 * (3 * r * r + 3 * r + 1)
+}
+
+/// The largest brush size.
+pub const MAX_SIZE: i32 = 16;
+
+/// A polyhex as the brush stamps it, scaled so it covers exactly `volume(size)` cells: each of its
+/// `pieces` hexes grows into a hex-shaped piece, the pieces spaced as superhexes tile, and the
+/// cells nearest the pieces' centres, up to the volume, make the shape. Pieces take the whole radius
+/// under their share of the volume, and grow a partial ring, sides first, to make it up; at whole
+/// radii (a tetrahex at any size) the pieces are exactly superhexes.
+///
+/// A cell's key orders it (`key`): its hex distance to the nearest piece centre, then its squared
+/// straight-line distance, then a tie-break hashed from its place in the shape. The shape is the
+/// cells whose key is at most `threshold`; the CPU finds that threshold once, and the GPU shaders
+/// only compare.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Placed {
+    /// The axial cell the shape is centred on.
+    pub origin: (i32, i32),
+    /// The pieces' centres, axial cells relative to `origin`.
     pub centres: [(i32, i32); 4],
-    pub radius: i32,
+    pub pieces: u32,
+    pub threshold: (u32, u32, u32),
+    pub volume: u32,
+}
+
+/// The key of the cell at axial offset `(q, r)` from a shape's origin, against `centres`: its hex
+/// distance to the nearest centre (doubled), then its squared straight-line distance, then a tie-break unique to the cell.
+pub fn key(centres: &[(i32, i32)], (q, r): (i32, i32)) -> (u32, u32, u32) {
+    let mut best = (u32::MAX, u32::MAX);
+    for &(cq, cr) in centres {
+        let (dq, dr) = (q - cq, r - cr);
+        let hex = (dq.abs() + dr.abs() + (dq + dr).abs()) as u32;
+        // The hex lattice's straight-line norm, squared, in axial coordinates.
+        let line = (dq * dq + dq * dr + dr * dr) as u32;
+        best = best.min((hex, line));
+    }
+    // Hashed high bits, so ties break without a bias; the offset in the low bits keeps every key
+    // near a shape unique, so exactly `volume` cells sit at or under the threshold.
+    let tie = (crate::hash(q, r, 0, SALT_TIE) & 0xffff) << 16 | ((q & 255) as u32) << 8 | (r & 255) as u32;
+    (best.0, best.1, tie)
 }
 
 impl Placed {
-    /// `shape`, turned `turns` sixths clockwise and mirrored if `mirror`, scaled so each hex is a
-    /// superhex of `radius`, and centred on the cell `(x, y)`.
-    pub fn new(shape: Tetrahex, turns: u32, mirror: bool, radius: i32, (x, y): (i32, i32)) -> Placed {
-        let radius = radius.max(0);
-        // Superhexes of radius R tile with neighbors at (2R + 1, -R) and (R, R + 1), the two unit
-        // steps (1, 0) and (0, 1) scaled; a linear map, so the shape keeps its adjacencies.
-        let scale = |(q, r): (i32, i32)| (q * (2 * radius + 1) + r * radius, -q * radius + r * (radius + 1));
-        let mut centres = shape.hexes().map(|mut h| {
-            if mirror {
-                h = (h.1, h.0);
-            }
-            for _ in 0..turns % 6 {
-                h = turn(h);
-            }
-            scale(h)
-        });
-        // Centre the shape: its mean, rounded to a cell, goes to (x, y).
-        let (mq, mr) = centres.iter().fold((0.0, 0.0), |s, c| (s.0 + c.0 as f32 / 4.0, s.1 + c.1 as f32 / 4.0));
-        let mid = round_axial(mq, mr);
-        let at = to_axial(x, y);
-        for c in &mut centres {
-            *c = (c.0 - mid.0 + at.0, c.1 - mid.1 + at.1);
+    /// `shape`, turned `turns` sixths clockwise and mirrored if `mirror`, scaled to `volume(size)`
+    /// cells and centred on the cell `(x, y)`.
+    pub fn new(shape: Polyhex, turns: u32, mirror: bool, size: i32, (x, y): (i32, i32)) -> Placed {
+        let volume = volume(size);
+        let hexes = shape.hexes();
+        let n = hexes.len() as f64;
+        // Each piece's radius, so the pieces together hold the volume: n (3 rho^2 + 3 rho + 1) = V.
+        let rho = ((9.0 - 12.0 * (1.0 - volume as f64 / n)).sqrt() - 3.0) / 6.0;
+        // Pieces of the whole radius R under rho sit where superhexes of that radius tile, centred
+        // on cells: the unit steps (1, 0) and (0, 1) go to (2 R + 1, -R) and (R, R + 1), a linear
+        // map, so adjacent hexes stay adjacent pieces. The threshold then grows each piece's outer
+        // ring, sides first, to the volume.
+        let big = (rho + 1e-6).floor() as i32;
+        let scale = |(q, r): (i32, i32)| (q * (2 * big + 1) + r * big, -q * big + r * (big + 1));
+        let placed: Vec<(i32, i32)> = hexes
+            .iter()
+            .map(|&h| {
+                let mut h = if mirror { (h.1, h.0) } else { h };
+                for _ in 0..turns % 6 {
+                    h = turn(h);
+                }
+                scale(h)
+            })
+            .collect();
+        // Centred on the shape's mean, rounded to a cell.
+        let (sq, sr) = placed.iter().fold((0, 0), |s, c| (s.0 + c.0, s.1 + c.1));
+        let (mq, mr) = ((sq as f64 / n).round() as i32, (sr as f64 / n).round() as i32);
+        let mut centres = [(0, 0); 4];
+        for (k, &(q, r)) in placed.iter().enumerate() {
+            centres[k] = (q - mq, r - mr);
         }
-        Placed { centres, radius }
+        let pieces = hexes.len() as u32;
+        // The threshold: the key of the volume-th nearest cell.
+        let reach = big + 2;
+        let mut keys = Vec::new();
+        for &(cq, cr) in &centres[..pieces as usize] {
+            for dq in -reach..=reach {
+                for dr in -reach..=reach {
+                    if (dq + dr).abs() <= reach {
+                        keys.push(((cq + dq, cr + dr), key(&centres[..pieces as usize], (cq + dq, cr + dr))));
+                    }
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        let mut keys: Vec<(u32, u32, u32)> = keys.into_iter().map(|(_, k)| k).collect();
+        keys.sort_unstable();
+        let threshold = keys[volume as usize - 1];
+        Placed { origin: to_axial(x, y), centres, pieces, threshold, volume }
     }
 
-    /// A shape, turn and mirroring chosen by `seed`.
-    pub fn random(seed: u32, radius: i32, at: (i32, i32)) -> Placed {
+    /// A shape, turn and mirroring chosen by `seed`, each of the twelve shapes equally likely.
+    pub fn random(seed: u32, size: i32, at: (i32, i32)) -> Placed {
         let h = crate::hash(seed as i32, 0, 0, SALT_SHAPE);
-        let shape = Tetrahex::ALL[(h % 7) as usize];
-        Placed::new(shape, (h / 7) % 6, (h / 42) & 1 == 1, radius, at)
+        let shape = Polyhex::ALL[(h % 12) as usize];
+        Placed::new(shape, (h / 12) % 6, (h / 72) & 1 == 1, size, at)
+    }
+
+    /// The same shape, centred on the cell `(x, y)` instead.
+    pub fn moved_to(self, (x, y): (i32, i32)) -> Placed {
+        Placed { origin: to_axial(x, y), ..self }
     }
 
     /// Whether the cell `(x, y)` is part of it.
     pub fn covers(&self, x: i32, y: i32) -> bool {
-        let p = to_axial(x, y);
-        self.centres.iter().any(|&c| hex_distance(p, c) <= self.radius)
+        let (q, r) = to_axial(x, y);
+        key(&self.centres[..self.pieces as usize], (q - self.origin.0, r - self.origin.1)) <= self.threshold
     }
 
-    /// The cells it covers, on or off the lattice: four superhexes, whatever the shape.
+    /// The cells it covers, on or off the lattice: always `volume(size)` of them.
     pub fn volume(&self) -> usize {
-        let r = self.radius as usize;
-        4 * (3 * r * r + 3 * r + 1)
+        self.volume as usize
     }
 
     /// Every cell it covers, as `(x, y)`, on or off the lattice.
     pub fn cells(&self) -> Vec<(i32, i32)> {
-        let r = self.radius;
+        let reach = self.centres.iter().map(|c| c.0.abs().max(c.1.abs())).max().unwrap_or(0) + 40;
         let mut out = Vec::with_capacity(self.volume());
-        for &(cq, cr) in &self.centres {
-            for dq in -r..=r {
-                for dr in (-r).max(-dq - r)..=r.min(-dq + r) {
-                    out.push(from_axial(cq + dq, cr + dr));
+        for dq in -reach..=reach {
+            for dr in -reach..=reach {
+                let (q, r) = (self.origin.0 + dq, self.origin.1 + dr);
+                let (x, y) = from_axial(q, r);
+                if self.covers(x, y) {
+                    out.push((x, y));
                 }
             }
         }
@@ -211,18 +302,6 @@ impl Placed {
     }
 }
 
-/// The salt of the brush's shape choice.
+/// The salts of the brush's shape choice and of its cells' tie-break.
 const SALT_SHAPE: u32 = 0x7e7a;
-
-/// The axial cell nearest fractional axial `(q, r)`.
-fn round_axial(q: f32, r: f32) -> (i32, i32) {
-    let s = -q - r;
-    let (mut rq, mut rr, rs) = (q.round(), r.round(), s.round());
-    let (dq, dr, ds) = ((rq - q).abs(), (rr - r).abs(), (rs - s).abs());
-    if dq > dr && dq > ds {
-        rq = -rr - rs;
-    } else if dr > ds {
-        rr = -rq - rs;
-    }
-    (rq as i32, rr as i32)
-}
+const SALT_TIE: u32 = 0x7e7b;

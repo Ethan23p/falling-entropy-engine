@@ -11,7 +11,7 @@ pub const MAX_STAMPS: usize = 256;
 /// The sim's uniforms: four words, then four per material (`Params` in sim.wgsl).
 const PARAMS_BYTES: u64 = 4 * (8 + 4 * 6);
 
-/// A brush stamp: a shape and the material it paints (`World::stamp`, `World::stamp_tetrahex`).
+/// A brush stamp: a shape and the material it paints (`World::stamp`, `World::stamp_polyhex`).
 #[derive(Clone, Copy, Debug)]
 pub struct Stamp {
     pub shape: Shape,
@@ -24,7 +24,7 @@ pub enum Shape {
     /// Scene scripts stamp these.
     Disc { x: f32, y: f32, radius: f32 },
     /// The player's brush.
-    Tetrahex(sim::Placed),
+    Polyhex(sim::Placed),
 }
 
 /// Bytes per stamp (`Stamp` in sim.wgsl).
@@ -42,9 +42,11 @@ impl Stamp {
                 w[4] = x.to_bits();
                 w[5] = y.to_bits();
             }
-            Shape::Tetrahex(t) => {
+            Shape::Polyhex(t) => {
                 w[0] = 1;
-                w[3] = t.radius as u32;
+                (w[2], w[3], w[7]) = t.threshold;
+                (w[4], w[5]) = (t.origin.0 as u32, t.origin.1 as u32);
+                w[6] = t.pieces;
                 for (k, (q, r)) in t.centres.iter().enumerate() {
                     w[8 + 2 * k] = *q as u32;
                     w[9 + 2 * k] = *r as u32;
@@ -59,7 +61,7 @@ impl Stamp {
     pub fn apply(&self, world: &mut sim::World) {
         match self.shape {
             Shape::Disc { x, y, radius } => world.stamp(x, y, radius, self.material),
-            Shape::Tetrahex(t) => world.stamp_tetrahex(&t, self.material),
+            Shape::Polyhex(t) => world.stamp_polyhex(&t, self.material),
         }
     }
 }
@@ -273,13 +275,20 @@ impl Lattice {
     ) {
         let mut data = words(&[self.width as u32, self.height as u32]);
         data.extend(floats(&[look.size, look.texel, look.origin[0], look.origin[1], look.edges]));
-        let (radius, material, centres) = match look.ghost {
-            Some((t, m)) => (t.radius, m as u32, t.centres),
-            None => (-1, 0, [(0, 0); 4]),
+        // The ghost (`Placed`): its pieces (0: none), material and threshold; each centre in a
+        // vec4's .xy, the origin in the first's .zw and the threshold's last word in the second's .z.
+        let (pieces, material, t) = match look.ghost {
+            Some((t, m)) => (t.pieces, m as u32, t),
+            None => (0, 0, sim::Placed::random(0, 0, (0, 0))),
         };
-        data.extend(words(&[radius as u32, material, look.bricks as u32, 0, 0]));
-        for (q, r) in centres {
-            data.extend(words(&[q as u32, r as u32, 0, 0]));
+        data.extend(words(&[pieces, material, look.bricks as u32, t.threshold.0, t.threshold.1]));
+        for (k, (q, r)) in t.centres.into_iter().enumerate() {
+            let (z, w) = match k {
+                0 => (t.origin.0 as u32, t.origin.1 as u32),
+                1 => (t.threshold.2, 0),
+                _ => (0, 0),
+            };
+            data.extend(words(&[q as u32, r as u32, z, w]));
         }
         debug_assert_eq!(data.len() as u64, VIEW_BYTES);
         queue.write_buffer(&self.view, 0, &data);
@@ -481,7 +490,7 @@ mod tests {
         // The brush: a particle only into a cell holding nothing, erasing anything but bedrock, in order.
         let disc = |x, y, radius, material| Stamp { shape: Shape::Disc { x, y, radius }, material };
         let hex = |seed, radius, at, material| Stamp {
-            shape: Shape::Tetrahex(sim::Placed::random(seed, radius, at)),
+            shape: Shape::Polyhex(sim::Placed::random(seed, radius, at)),
             material,
         };
         let stamps = [
