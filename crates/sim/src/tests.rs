@@ -385,11 +385,25 @@ fn encoding_state_round_trips() {
         for velocity in velocities {
             for offer in [None, Some(Dir::Up), Some(Dir::UpLeft)] {
                 for accept in [None, Some(Dir::Down), Some(Dir::UpRight)] {
-                    for (reject, waits) in [(0, false), (1, true), (0b101010, false), (63, true)] {
+                    for (reject, delays) in [(0, false), (1, true), (0b101010, false), (63, true)] {
                         for (request, gives) in [(None, false), (Some(Dir::DownLeft), true), (Some(Dir::Up), false)] {
-                            let s = State { material, velocity, offer, accept, reject, request, gives, waits };
-                            assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
-                            assert!(s.encode() < 1 << 20, "20 bits");
+                            for (wait, held) in [(None, false), (Some(Dir::Down), true), (Some(Dir::UpLeft), false)] {
+                                let wait = if accept.is_some() { None } else { wait };
+                                let s = State {
+                                    material,
+                                    velocity,
+                                    offer,
+                                    accept,
+                                    reject,
+                                    request,
+                                    gives,
+                                    wait,
+                                    held,
+                                    delays,
+                                };
+                                assert_eq!(State::decode(s.encode(), s.velocity.encode()), s);
+                                assert!(s.encode() < 1 << 22, "22 bits");
+                            }
                         }
                     }
                 }
@@ -404,10 +418,10 @@ fn encoding_a_cell_keeps_words_per_phase_parity() {
     // so the words a neighbor at p reads stay put until p + 2.
     let mut w = World::new(3, 3);
     w.paint(1, 0, Material::Bedrock);
-    const { assert!(STATE_MASK == (1 << 20) - 1 && PHASE_MASK == (1 << 12) - 1 && WORDS == 4) };
+    const { assert!(STATE_MASK == (1 << 22) - 1 && PHASE_MASK == (1 << 10) - 1 && WORDS == 4) };
     w.step();
     let words = &w.words()[WORDS..2 * WORDS];
-    assert_eq!((words[0] >> 20, words[1] >> 20), (0, 1));
+    assert_eq!((words[0] >> 22, words[1] >> 22), (0, 1));
     assert_eq!(State::decode(words[0] & STATE_MASK, words[2]), State::BEDROCK);
     assert_eq!((w.kept(1, 0), w.cell(1, 0)), (State::BEDROCK, State::BEDROCK));
 }
@@ -523,13 +537,14 @@ fn propose_into_other_particles_weighted_air_then_water_then_sand() {
 
 #[test]
 fn propose_a_committed_particle_proposes_nothing_new() {
-    // My offer is out, being evaluated: I neither offer again nor accept an offer into me.
+    // My offer is out, being evaluated: I neither offer again nor accept an offer into me; I keep
+    // the one offer into me on the hook.
     let me = offering(Dir::Down, DOWN);
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     for phase in 0..50 {
         let s = next(me, State::AIR, seen, 2, 2, phase, &Physics::default());
-        let rejected = State { reject: 1 << Dir::Up as u8, ..sand(DOWN) };
-        assert_eq!(s, rejected, "the offer is cleared from the published state; the particle stays");
+        let waited = State { wait: Some(Dir::Up), ..sand(DOWN) };
+        assert_eq!(s, waited, "the offer is cleared from the published state; the particle stays");
     }
 }
 
@@ -605,13 +620,14 @@ fn evaluate_air_gives_way_to_sand_but_not_to_air() {
 }
 
 #[test]
-fn evaluate_air_tied_up_in_its_own_offer_rejects_sand() {
-    // Its air is in another castle: with its own offer out, its capacity is tied up, so it rejects
-    // the sand, explicitly.
+fn evaluate_air_tied_up_in_its_own_offer_waits_on_sand() {
+    // Its air is in another castle: with its own offer out, its capacity is tied up, so it can't
+    // accept the sand. The air it would spawn on leaving still takes sand, so it keeps the sand on
+    // the hook: wait.
     let me = State { offer: Some(Dir::DownLeft), ..State::AIR };
     let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
     let s = next(me, State::AIR, seen, 2, 2, 1, &Physics::default());
-    assert_eq!((s.material, s.accept, s.rejected(Dir::Up)), (Material::Air, None, true));
+    assert_eq!((s.material, s.accept, s.wait, s.reject), (Material::Air, None, Some(Dir::Up), 0));
 }
 
 #[test]
@@ -1068,11 +1084,118 @@ fn evaluate_a_tied_up_particle_rejects_a_request() {
 }
 
 #[test]
-fn evaluate_capacity_tied_up_in_a_request_rejects_offers() {
+fn evaluate_capacity_tied_up_in_a_request_waits_on_one_offer() {
+    // A request is a commitment too: the capacity it reserves frees if it's rejected, so one offer
+    // waits for it, and the rest are rejected.
     let me = State { request: Some(Dir::Down), ..State::VACUUM };
-    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN))]);
+    let seen = around(&[(Dir::Up, offering(Dir::Down, DOWN)), (Dir::UpLeft, offering(Dir::DownRight, DOWN))]);
     let s = next(me, State::VACUUM, seen, 2, 2, 0, &Physics::default());
-    assert_eq!((s.material, s.accept, s.reject), (Material::Vacuum, None, 1 << Dir::Up as u8));
+    assert_eq!((s.material, s.accept), (Material::Vacuum, None));
+    let w = s.wait.expect("one offer waits");
+    assert_eq!(s.reject, (1 << Dir::Up as u8 | 1 << Dir::UpLeft as u8) & !(1 << w as u8));
+}
+
+// Wait: the third verdict
+
+#[test]
+fn evaluate_a_committed_resource_waits_on_one_offer_and_rejects_the_rest() {
+    // My sand is offered away below; three neighbors offer sand into me. I can accept none of them
+    // now, but the capacity my offer may free can take one: it waits, the others are rejected.
+    let mut waited = [0; 6];
+    for phase in 0..300 {
+        let seen = around(&[
+            (Dir::Up, offering(Dir::Down, FALLING)),
+            (Dir::UpLeft, offering(Dir::DownRight, FALLING)),
+            (Dir::UpRight, offering(Dir::DownLeft, FALLING)),
+        ]);
+        let s = next(offering(Dir::Down, DOWN), State::VACUUM, seen, 2, 2, phase, &Physics::default());
+        assert_eq!((s.material, s.accept, s.offer), (Material::Sand, None, None), "proposes nothing new");
+        let w = s.wait.expect("one offer waits");
+        let all = 1 << Dir::Up as u8 | 1 << Dir::UpLeft as u8 | 1 << Dir::UpRight as u8;
+        assert_eq!(s.reject, all & !(1 << w as u8));
+        waited[w as usize] += 1;
+    }
+    // Selected as evaluate selects: the move that lines up with its velocity is favored.
+    assert!(waited[Dir::Up as usize] > waited[Dir::UpLeft as usize] + waited[Dir::UpRight as usize], "{waited:?}");
+}
+
+#[test]
+fn evaluate_waits_only_on_an_offer_the_freed_capacity_would_entertain() {
+    // My air is offered into vacuum; leaving, it spawns a new air, which takes sand but not air.
+    let me = State { offer: Some(Dir::Down), ..State::AIR };
+    let air = State { offer: Some(Dir::Down), ..State::AIR };
+    let s = next(me, State::AIR, around(&[(Dir::Up, air)]), 2, 2, 0, &Physics::default());
+    assert_eq!((s.wait, s.reject), (None, 1 << Dir::Up as u8));
+}
+
+#[test]
+fn resolve_a_waited_offer_is_held_one_phase() {
+    // The target below kept my offer on the hook: it stands one more phase, held, my particle still
+    // committed and its velocity unchanged. I propose nothing new.
+    let kept = offering(Dir::Down, DOWN);
+    let seen = around(&[(Dir::Down, State { wait: Some(Dir::Up), ..offering(Dir::DownLeft, DOWN) })]);
+    let s = next(sand(DOWN), kept, seen, 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.velocity, s.offer, s.held), (Material::Sand, DOWN, Some(Dir::Down), true));
+    assert_eq!(s.counts_as(), Material::Sand);
+}
+
+#[test]
+fn evaluate_a_held_offer_is_not_a_new_offer() {
+    let held = State { held: true, ..offering(Dir::Down, DOWN) };
+    let s = next(State::VACUUM, State::VACUUM, around(&[(Dir::Up, held)]), 2, 2, 0, &Physics::default());
+    assert_eq!((s.material, s.accept, s.wait, s.reject), (Material::Vacuum, None, None, 0));
+}
+
+#[test]
+fn evaluate_the_waited_offer_is_settled_first_after_my_own_resolves() {
+    let p = Physics::default();
+    // Last phase I offered my sand below and kept the sand above on the hook; above now publishes
+    // its offer held. Below accepted mine: I'm free, and I accept the waited sand, ahead of a fresh
+    // offer from the upper left.
+    let me = State { wait: Some(Dir::Up), ..sand(DOWN) };
+    let kept = offering(Dir::Down, DOWN);
+    let above = sand(FALLING);
+    let fresh = offering(Dir::DownRight, FALLING);
+    let below = State { accept: Some(Dir::Up), ..sand(DOWN) };
+    let s = next(me, kept, around(&[(Dir::Up, above), (Dir::UpLeft, fresh), (Dir::Down, below)]), 2, 2, 0, &p);
+    assert_eq!((s.material, s.accept), (Material::Sand, Some(Dir::Up)));
+    assert_eq!(s.velocity, p.moved(Material::Sand, FALLING));
+    assert_eq!(s.reject, 1 << Dir::UpLeft as u8);
+    // Below rejected mine: still full, I reject the waited sand. It waited its one phase.
+    let below = State { reject: 1 << Dir::Up as u8, ..sand(DOWN) };
+    let s = next(me, kept, around(&[(Dir::Up, above), (Dir::Down, below)]), 2, 2, 0, &p);
+    assert_eq!((s.material, s.accept, s.wait), (Material::Sand, None, None));
+    assert!(s.rejected(Dir::Up));
+}
+
+#[test]
+fn resolve_a_held_offer_reads_the_final_verdict() {
+    let p = Physics::default();
+    let me = State { held: true, ..offering(Dir::Down, DOWN) };
+    let accepted = State { accept: Some(Dir::Up), ..sand(DOWN) };
+    let s = next(me, sand(DOWN), around(&[(Dir::Down, accepted)]), 2, 2, 0, &p);
+    assert_eq!((s.material, s.offer, s.held), (Material::Vacuum, None, false));
+    let rejected = State { reject: 1 << Dir::Up as u8, ..sand(DOWN) };
+    let s = next(me, sand(DOWN), around(&[(Dir::Down, rejected)]), 2, 2, 0, &p);
+    assert_eq!((s.material, s.held), (Material::Sand, false));
+    assert!(s.offer.is_some(), "free again, it proposes anew");
+}
+
+#[test]
+fn conservation_a_waited_transfer_counts_once() {
+    // A column of sand over vacuum, every cell offering down on the same beat: waits happen, and
+    // every step keeps the census (debug builds check it in `step`).
+    let mut w = World::new(9, 12);
+    for y in 0..8 {
+        w.paint(4, y, Material::Sand);
+    }
+    let mut waits = 0;
+    for _ in 0..80 {
+        w.step();
+        waits += (0..12).filter(|&y| w.cell(4, y).wait.is_some()).count();
+        assert_eq!(w.count(Material::Sand), 8);
+    }
+    assert!(waits > 0, "a falling column waits on some offers");
 }
 
 #[test]

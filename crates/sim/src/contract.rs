@@ -10,7 +10,15 @@
 //! | Condition | Effect on the origin | Effect on the target |
 //! |---|---|---|
 //! | Accepted | `Release`: holds nothing; or for air, `Spawn`: holds a new air | `Receive`: holds the particle, with gravity's impulse |
+//! | Wait | `Hold`: the offer stands one more phase, its particle still committed | none yet: the target settles it next phase |
 //! | Rejected | `Deflect`: keeps the particle; its intent turns away from the target | none |
+//!
+//! **Wait** is for a target whose resources are committed to a contract of its own (an offer, or a
+//! request) that resolves next phase. Of the offers into it, it keeps one on the hook, the one the
+//! capacity it may free would entertain, selected as evaluate selects, and rejects the rest: one
+//! capacity can free, so one offer can wait for it. Next phase, right after its own contract
+//! resolves, it gives that offer a final verdict, accept or reject, before any new offer. An offer
+//! waits one phase at most.
 //!
 //! Air and vacuum interact specially: a cell holding air offers it into vacuum (the only cell that
 //! takes air), and on acceptance transfers it and spawns itself a new air. Air is insubstantial,
@@ -38,11 +46,19 @@
 //! - A proposes it in its update at phase `p - 1`: A publishes `offer` (toward B) at `p`, and its
 //!   particle is committed.
 //! - B evaluates it in its update at `p`, and publishes its verdict at `p + 1`: `accept` naming A,
-//!   or `reject` naming A. Every offer B evaluates gets one or the other. Meanwhile A, its particle
-//!   tied up in the offer and its capacity with it, proposes nothing new, and rejects every offer
-//!   into it.
+//!   `wait` naming A, or `reject` naming A. Every offer B evaluates gets one of them. Meanwhile A,
+//!   its particle tied up in the offer and its capacity with it, proposes nothing new, accepts no
+//!   offer into it, and keeps one on the hook (wait).
 //! - A resolves it in its update at `p + 1`, reading B's verdict. The offer is in A's kept-back
 //!   state then (the one it published at `p`).
+//!
+//! A waited offer from A to B, likewise:
+//! - A proposes it at `p - 1`; B, its resources committed, publishes `wait` naming A at `p + 1`.
+//! - A, in its update at `p + 1`, holds: it publishes the offer again at `p + 2`, `held`, its
+//!   particle still committed. Neighbors don't evaluate a held offer.
+//! - B, in its update at `p + 1`, resolves its own contract, then settles A's offer: it publishes
+//!   `accept` or `reject` naming A at `p + 2`.
+//! - A resolves the held offer in its update at `p + 2`, reading that verdict.
 //!
 //! While the particle is in transport, both cells register as holding it; a census counts it once,
 //! at its origin (`State::counts_as`).
@@ -74,6 +90,7 @@ pub struct Request {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
     Accepted,
+    Wait,
     Rejected,
 }
 
@@ -96,6 +113,9 @@ pub enum Effect {
     /// The particle the cell requested arrives from the origin `from` (as the origin published it,
     /// still holding it), having made a physical move: gravity's impulse is applied to its velocity.
     Take { origin: State },
+    /// The cell's offer toward `toward` was told to wait: it stands one more phase, `held`, its
+    /// particle still committed.
+    Hold { toward: Dir },
     /// The particle stays, and its intent turns away from the target `from`, perpendicular to it, by
     /// its material's deflection: to the side it already leans or, pointing dead on, to the side
     /// `bits` picks.
@@ -110,11 +130,14 @@ impl Offer {
     }
 
     /// The verdict, as the origin reads it from the target's published state: accepted if the
-    /// target's acceptance names this cell, rejected if its rejections do, and none yet otherwise.
+    /// target's acceptance names this cell, wait if its wait does, rejected if its rejections do,
+    /// and none yet otherwise.
     pub fn verdict(self, target: State) -> Option<Verdict> {
         let me = self.toward.opposite();
         if target.accept == Some(me) {
             Some(Verdict::Accepted)
+        } else if target.wait == Some(me) {
+            Some(Verdict::Wait)
         } else if target.rejected(me) {
             Some(Verdict::Rejected)
         } else {
@@ -130,6 +153,7 @@ impl Offer {
                 let released = if origin.material.is_substantial() { Effect::Release } else { Effect::Spawn };
                 (released, Effect::Receive { from: self.toward.opposite(), origin })
             }
+            Verdict::Wait => (Effect::Hold { toward: self.toward }, Effect::None),
             Verdict::Rejected => (Effect::Deflect { from: self.toward, bits }, Effect::None),
         }
     }
@@ -160,7 +184,7 @@ impl Request {
     pub fn terms(self, verdict: Verdict, origin: State) -> (Effect, Effect) {
         match verdict {
             Verdict::Accepted => (Effect::Give { to: self.from.opposite() }, Effect::Take { origin }),
-            Verdict::Rejected => (Effect::None, Effect::None),
+            Verdict::Rejected | Verdict::Wait => (Effect::None, Effect::None),
         }
     }
 }
@@ -184,6 +208,10 @@ impl Effect {
             Effect::Take { origin } => {
                 live.material = origin.material;
                 live.velocity = physics.moved(origin.material, origin.velocity);
+            }
+            Effect::Hold { toward } => {
+                live.offer = Some(toward);
+                live.held = true;
             }
             Effect::Deflect { from, bits } => {
                 let (ix, iy) = deflection(physics.deflection(live.material) as i32, live.velocity, from, bits);
