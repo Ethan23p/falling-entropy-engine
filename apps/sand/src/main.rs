@@ -279,7 +279,7 @@ impl Game {
     }
 
     fn stamp(&mut self, placed: sim::Placed) {
-        self.stamps.push(Stamp { shape: Shape::Tetrahex(placed), material: self.material() });
+        self.stamps.push(Stamp { shape: Shape::Polyhex(placed), material: self.material() });
     }
 
     fn option(&mut self, control: options::Control) {
@@ -394,7 +394,7 @@ impl App for Game {
         // Holding the brush confirms its ghost again and again.
         let material = self.material();
         for placed in self.brush.held(frame.time, c.brush_hold, c.brush_repeat) {
-            self.stamps.push(Stamp { shape: Shape::Tetrahex(placed), material });
+            self.stamps.push(Stamp { shape: Shape::Polyhex(placed), material });
         }
 
         let phases = self.pending.min(c.max_phases.max(1) as u32);
